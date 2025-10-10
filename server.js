@@ -532,13 +532,15 @@ function computeScannerStatsFromLogs() {
       total += 1;
 
       // reason=... (stops at next space)
-      let reason = "Unknown";
-      try {
-        const mR = /reason=([^ ]+)/.exec(line);
-        if (mR && mR[1]) {
-          reason = decodeURIComponent(mR[1].replace(/\+/g, " ")).replace(/_/g, " ");
-        }
-      } catch {}
+      let reason = "unknown";
+const rPos = line.indexOf(" reason=");
+if (rPos >= 0) {
+  let tail = line.slice(rPos + 8);           // after " reason="
+  const nPos = tail.indexOf(" nextLen=");
+  if (nPos >= 0) tail = tail.slice(0, nPos); // trim at nextLen=
+  reason = tail.trim().replace(/_/g, " ");
+}
+try { reason = decodeURIComponent(reason.replace(/\+/g, " ")); } catch {}
 
       // ua="..."
       let uaKey = "(empty)";
