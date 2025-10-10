@@ -1367,18 +1367,28 @@ app.get("/:data(*)", async (req, res) => {
 });
 
 /* ================== Admin scanner stats endpoint (inserted) ============== */
-app.get("/admin/scanner-stats", requireAdmin, (req, res) => {
-  res.json({
-    ok: true,
-    total: SCANNER_STATS.total,
-    byReason: SCANNER_STATS.byReason,
-    topUA: Object.entries(SCANNER_STATS.byUA)
-      .sort((a,b) => b[1]-a[1])
-      .slice(0, 20)
-      .map(([ua,count]) => ({ ua, count })),
-    now: new Date().toISOString()
-  });
-});
+app.get(
+  "/admin/scanner-stats",
+  (req, res, next) => {
+    // accept header Bearer token OR query/ephemeral token
+    if (isAdmin(req) || isAdminSSE(req)) return next();
+    addLog(`[ADMIN] scanner-stats denied ip=${getClientIp(req)} ua="${(req.get("user-agent")||"").slice(0,80)}"`);
+    return res.status(401).type("text/plain").send("Unauthorized");
+  },
+  (req, res) => {
+    res.json({
+      ok: true,
+      total: SCANNER_STATS.total,
+      byReason: SCANNER_STATS.byReason,
+      topUA: Object.entries(SCANNER_STATS.byUA)
+        .sort((a,b) => b[1] - a[1])
+        .slice(0, 20)
+        .map(([ua, count]) => ({ ua, count })),
+      now: new Date().toISOString()
+    });
+  }
+);
+
 /* ======================================================================== */
 
 /* ================== Startup summary ====================================== */
