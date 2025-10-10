@@ -514,6 +514,50 @@ const EMAIL_SCANNER_UAS = [
 // ---- scanner logging helper (counts + rich log line) ----
 const SCANNER_STATS = { total: 0, byReason: Object.create(null), byUA: Object.create(null) };
 
+/* ======== Derived stats from LOGS (Option A) ========
+   Scans in-memory LOGS so stats reflect all recorded hits, not just counters. */
+function computeScannerStatsFromLogs() {
+  const byReason = Object.create(null);
+  const byUA = Object.create(null);
+  let total = 0;
+
+  const lines = Array.isArray(LOGS) ? LOGS : [];
+  for (const line of lines) {
+    if (!line || typeof line !== 'string') continue;
+
+    // We only count interstitial events that we explicitly log
+    // Example:
+    // [SCANNER] 200 interstitial ip=... ua="Microsoft Office ..." path="/..." accept="..." referer="" reason=Known scanner UA nextLen=124
+    if (line.includes("[SCANNER] 200 interstitial")) {
+      total += 1;
+
+      // reason=... (stops at next space)
+      let reason = "Unknown";
+      try {
+        const mR = /reason=([^ ]+)/.exec(line);
+        if (mR && mR[1]) {
+          reason = decodeURIComponent(mR[1].replace(/\+/g, " ")).replace(/_/g, " ");
+        }
+      } catch {}
+
+      // ua="..."
+      let uaKey = "(empty)";
+      try {
+        const mU = /ua="([^"]{0,200})"/.exec(line);
+        const ua = (mU && mU[1]) ? mU[1] : "(empty)";
+        uaKey = (ua.split(/[;\s]/)[0] || "(empty)").toLowerCase();
+      } catch {}
+
+      byReason[reason] = (byReason[reason] || 0) + 1;
+      byUA[uaKey] = (byUA[uaKey] || 0) + 1;
+    }
+  }
+
+  return { total, byReason, byUA };
+}
+
+
+
 function logScannerHit(req, reason, nextEnc) {
   const ip   = getClientIp(req);
   const ua   = (req.get("user-agent") || "").slice(0, 160);
@@ -1349,19 +1393,32 @@ app.get(
     addLog(`[ADMIN] scanner-stats denied ip=${getClientIp(req)} ua="${(req.get("user-agent")||"").slice(0,80)}"`);
     return res.status(401).type("text/plain").send("Unauthorized");
   },
+  
   (req, res) => {
-    res.json({
-      ok: true,
+    // Option A: DERIVE from LOGS so it reflects past hits (and survives restarts if logs are persisted)
+    const derived = computeScannerStatsFromLogs();
+    const use = (derived && derived.total > 0) ? derived : {
       total: SCANNER_STATS.total,
       byReason: SCANNER_STATS.byReason,
-      topUA: Object.entries(SCANNER_STATS.byUA)
-        .sort((a,b) => b[1] - a[1])
-        .slice(0, 20)
-        .map(([ua, count]) => ({ ua, count })),
+      byUA: SCANNER_STATS.byUA
+    };
+
+    const topUA = Object.entries(use.byUA || {})
+      .sort((a,b) => b[1] - a[1])
+      .slice(0, 20)
+      .map(([ua, count]) => ({ ua, count }));
+
+    res.json({
+      ok: true,
+      source: (derived && derived.total > 0) ? "logs" : "counters",
+      total: use.total || 0,
+      byReason: use.byReason || {},
+      topUA,
       now: new Date().toISOString()
     });
   }
 );
+
 /* ======================================================================== */
 /* === DEBUG decrypt — place BEFORE /r and BEFORE '/:data(*)' =============== */
 app.get("/__debug/decrypt", requireAdmin, (req, res) => {
