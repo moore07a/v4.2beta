@@ -1,4 +1,4 @@
-// server.js — AES redirector + Cloudflare Turnstile, hardened (v4.2 Beta)
+// server.js — AES redirector + Cloudflare Turnstile, hardened (v4.3 Beta)
 require("dotenv").config();
 const express = require("express");
 const crypto = require("crypto");
