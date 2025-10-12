@@ -1242,13 +1242,16 @@ function splitCipherAndEmail(baseString, decodeFn, isEmailFn) {
   function rhsDecodesToEmail(rhs) {
     if (!rhs) return { ok: false, decoded: "" };
 
-    const cand1 = (decodeFn(rhs) || "").trim();
+    // First try: clean up any trailing slashes
+    const cleanRhs = rhs.replace(/\/+$/, '');
+    
+    const cand1 = (decodeFn(cleanRhs) || "").trim();
     if (cand1 && isEmailFn(cand1)) {
       return { ok: true, decoded: cand1, src: "b64" };
     }
 
-    // Support plaintext/URL-encoded emails too (e.g., after "//email@foo.com")
-    const cand2 = (safeDecode(rhs) || "").trim();
+    // Support plaintext/URL-encoded emails too
+    const cand2 = (safeDecode(cleanRhs) || "").trim();
     if (cand2 && isEmailFn(cand2)) {
       return { ok: true, decoded: cand2, src: "raw" };
     }
