@@ -1,4 +1,4 @@
-// server.js — AES redirector + Cloudflare Turnstile, hardened (v4.5 Beta)
+// server.js — AES redirector + Cloudflare Turnstile, hardened (v4.6 Advance Beta)
 require("dotenv").config();
 const express = require("express");
 const crypto = require("crypto");
@@ -448,6 +448,66 @@ function normHost(h){ return (h||"").split(":")[0].replace(/\.$/,"").toLowerCase
 /* ================== Small helpers ========================================= */
 function safeDecode(s) {
   try { return decodeURIComponent(s); } catch { return s; }
+}
+
+// ================== CHALLENGE TOKEN FUNCTIONS (using ADMIN_TOKEN) ==================
+function createChallengeToken(nextEnc) {
+  const exp = Date.now() + (10 * 60 * 1000); // 10 min expiry
+  const payload = { next: nextEnc, exp, ts: Date.now() };
+  const token = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const sig = crypto.createHmac('sha256', process.env.ADMIN_TOKEN)
+                   .update(token).digest('base64url');
+  return `${token}.${sig}`;
+}
+
+function verifyChallengeToken(challengeToken) {
+  if (!challengeToken || typeof challengeToken !== 'string') return null;
+  
+  const parts = challengeToken.split('.');
+  if (parts.length !== 2) return null;
+  
+  const [token, sig] = parts;
+  
+  // Verify signature using ADMIN_TOKEN
+  const expectedSig = crypto.createHmac('sha256', process.env.ADMIN_TOKEN)
+                          .update(token).digest('base64url');
+  if (sig !== expectedSig) return null;
+  
+  try {
+    const payload = JSON.parse(Buffer.from(token, 'base64url').toString());
+    // Check expiry
+    if (Date.now() > payload.exp) return null;
+    return payload;
+  } catch (e) {
+    return null;
+  }
+}
+
+// ================== ENCRYPTED CHALLENGE DATA ==================
+function encryptChallengeData(payload) {
+  const json = JSON.stringify(payload);
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', AES_KEYS[0], iv);
+  const encrypted = Buffer.concat([cipher.update(json, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return Buffer.concat([iv, encrypted, tag]).toString('base64url');
+}
+
+function decryptChallengeData(encryptedData) {
+  try {
+    const buf = Buffer.from(encryptedData, 'base64url');
+    const iv = buf.slice(0, 12);
+    const ciphertext = buf.slice(12, -16);
+    const tag = buf.slice(-16);
+    
+    const decipher = crypto.createDecipheriv('aes-256-gcm', AES_KEYS[0], iv);
+    decipher.setAuthTag(tag);
+    
+    const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+    return JSON.parse(decrypted.toString('utf8'));
+  } catch (e) {
+    return null;
+  }
 }
 
 // Header-aware IP resolution (Cloudflare → Netlify → common LB → Express fallback)
@@ -995,6 +1055,25 @@ app.post("/admin/strike-reset", (req, res) => {
   return res.json({ok:true, message:"strikes reset", ip});
 });
 
+// ================== CHALLENGE DATA DECRYPTION ENDPOINT ==================
+app.post("/decrypt-challenge-data", 
+  express.json({ limit: "1kb" }),
+  (req, res) => {
+    const { data } = req.body || {};
+    if (!data) return res.json({ success: false, error: "No data" });
+    
+    const payload = decryptChallengeData(data);
+    if (!payload) return res.json({ success: false, error: "Decryption failed" });
+    
+    // Verify the payload hasn't expired (5 min max)
+    if (Date.now() - payload.ts > 5 * 60 * 1000) {
+      return res.json({ success: false, error: "Payload expired" });
+    }
+    
+    res.json({ success: true, payload });
+  }
+);
+
 /* ================== Health / Logs / Debug ================================ */
 app.get("/health", (_req, res) => res.json({ ok:true, time:new Date().toISOString() }));
 
@@ -1482,10 +1561,17 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     "connect-src 'self' https:",
   ].join("; "));
 
-  const sitekeyJS = JSON.stringify(TURNSTILE_SITEKEY);
-  const cdataJS   = JSON.stringify(cdata);
-  const nextJS    = JSON.stringify(nextEnc);
-  const lhJS      = JSON.stringify(linkHash);
+    // ENCRYPT all sensitive data instead of exposing in plaintext
+  const challengePayload = {
+    sitekey: TURNSTILE_SITEKEY,
+    cdata: cdata,
+    next: nextEnc,
+    lh: linkHash,
+    ts: Date.now()
+  };
+  
+  const encryptedData = encryptChallengeData(challengePayload);
+  const encryptedDataJS = JSON.stringify(encryptedData);
 
 res.type("html").send(`<!doctype html><html><head>
 <meta charset="utf-8">
@@ -1529,55 +1615,78 @@ res.type("html").send(`<!doctype html><html><head>
   .err{ color:#ef4444; }
 </style>
 <script>
-  const SITEKEY  = ${sitekeyJS};
-  const CDATA    = ${cdataJS};
-  const NEXT_ENC = ${nextJS};
-  const LH       = ${lhJS};
+  const ENCRYPTED_DATA = ${encryptedDataJS};
+
+  function decryptChallengeData(encrypted) {
+    return fetch('/decrypt-challenge-data', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ data: encrypted })
+    }).then(r => r.json());
+  }
 
   function onOK(token){
     const s = document.getElementById('status'); s.textContent = 'Verifying…';
-    try {
-      const decoded = decodeURIComponent(NEXT_ENC);
-      const parts = decoded.split('?');
-      const base = parts[0];
-      const qs = parts[1] || '';
-      const sp = new URLSearchParams(qs);
-      sp.delete('cft'); sp.delete('lh');
-      sp.append('cft', token);
-      sp.append('lh', LH);
-      const suffix = '&' + sp.toString();
-      location.href = '/r?d=' + encodeURIComponent(base) + suffix;
-    } catch(e) {
-      s.textContent = 'Navigation error. Please retry.';
-      fetch('/ts-client-log', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phase:'callback-nav',msg:e.message,stack:e.stack})});
-    }
+    
+    decryptChallengeData(ENCRYPTED_DATA).then(data => {
+      if (!data.success) throw new Error('Decryption failed');
+      
+      const { next, lh } = data.payload;
+      
+      try {
+        const decoded = decodeURIComponent(next);
+        const parts = decoded.split('?');
+        const base = parts[0];
+        const qs = parts[1] || '';
+        const sp = new URLSearchParams(qs);
+        sp.delete('cft'); sp.delete('lh');
+        sp.append('cft', token);
+        sp.append('lh', lh);
+        const suffix = '&' + sp.toString();
+        location.href = '/r?d=' + encodeURIComponent(base) + suffix;
+      } catch(e) {
+        s.textContent = 'Navigation error. Please retry.';
+        fetch('/ts-client-log', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phase:'callback-nav',msg:e.message,stack:e.stack})});
+      }
+    }).catch(e => {
+      s.textContent = 'Security error. Please refresh.';
+      fetch('/ts-client-log', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phase:'decrypt-error',msg:e.message})});
+    });
   }
+
   function onErr(){
     document.getElementById('status').textContent = 'Failed to load challenge. Check network/adblock. If this repeats, wait a few minutes and retry.';
     fetch('/ts-client-log', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phase:'error-callback'})});
   }
+
   function onTimeout(){
-  document.getElementById('status').textContent = 'Challenge timed out. Refresh the page.';
-  fetch('/ts-client-log', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
-    phase:'timeout', vis: document.visibilityState, webdriver: !!(navigator.webdriver ?? false), ts: Date.now()
-  })});
+    document.getElementById('status').textContent = 'Challenge timed out. Refresh the page.';
+    fetch('/ts-client-log', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
+      phase:'timeout', vis: document.visibilityState, webdriver: !!(navigator.webdriver ?? false), ts: Date.now()
+    })});
   }
+
   function boot(){
-    try{
+    decryptChallengeData(ENCRYPTED_DATA).then(data => {
+      if (!data.success) throw new Error('Decryption failed');
+      
+      const { sitekey, cdata } = data.payload;
+      
       if (!window.turnstile) { setTimeout(boot, 200); return; }
       window.turnstile.render('#ts', {
-        sitekey: SITEKEY,
+        sitekey: sitekey,
         action: 'link_redirect',
-        cData: CDATA,
+        cData: cdata,
         appearance: 'always',
         callback: onOK,
         'error-callback': onErr,
         'timeout-callback': onTimeout
       });
       document.getElementById('status').textContent = 'Challenge ready.';
-    }catch(e){
-      fetch('/ts-client-log',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phase:'boot-error', msg:e.message})});
-    }
+    }).catch(e => {
+      document.getElementById('status').textContent = 'Security initialization failed. Refresh.';
+      fetch('/ts-client-log',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phase:'boot-decrypt-error', msg:e.message})});
+    });
   }
 </script>
 <script src="${TURNSTILE_ORIGIN}/turnstile/v0/api.js?render=explicit"
