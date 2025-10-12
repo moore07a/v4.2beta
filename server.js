@@ -1236,6 +1236,7 @@ function maskEmail(e) {
 // --- Robust cipher/email splitter Supports ["//","__","--","~~"] first; single "/" only if RHS is a valid email. ---
 function splitCipherAndEmail(baseString, decodeFn, isEmailFn) {
   const s = String(baseString || "");
+  console.log(`[DEBUG] splitCipherAndEmail input: ${s.slice(0,100)}`); // ADD THIS LINE
   let mainPart = s, emailPart = "", delimUsed = "";
 
   // Tries base64url/base64 via decodeFn first, then URL-decode (raw/plain).
@@ -1247,15 +1248,17 @@ function splitCipherAndEmail(baseString, decodeFn, isEmailFn) {
     
     const cand1 = (decodeFn(cleanRhs) || "").trim();
     if (cand1 && isEmailFn(cand1)) {
+      console.log(`[DEBUG] Email found via b64: ${cand1}`); // ADD THIS LINE
       return { ok: true, decoded: cand1, src: "b64" };
     }
 
     // Support plaintext/URL-encoded emails too
     const cand2 = (safeDecode(cleanRhs) || "").trim();
     if (cand2 && isEmailFn(cand2)) {
+      console.log(`[DEBUG] Email found via raw: ${cand2}`); // ADD THIS LINE
       return { ok: true, decoded: cand2, src: "raw" };
     }
-
+    console.log(`[DEBUG] No email found in: ${cleanRhs.slice(0,50)}`); // ADD THIS LINE
     return { ok: false, decoded: "" };
   }
 
@@ -1263,13 +1266,16 @@ function splitCipherAndEmail(baseString, decodeFn, isEmailFn) {
   const strongDelims = ["//","__","--","~~"];
   for (const d of strongDelims) {
     let i = s.lastIndexOf(d);
+    console.log(`[DEBUG] Searching for "${d}", found at index: ${i}`); // ADD THIS LINE
     while (i >= 0) {
       const rhs = s.slice(i + d.length);
+      console.log(`[DEBUG] Testing RHS: ${rhs.slice(0,50)}`); // ADD THIS LINE
       const chk = rhsDecodesToEmail(rhs);
       if (chk.ok) {
         mainPart = s.slice(0, i);
         emailPart = rhs;     // keep the raw RHS; you'll decode later downstream
         delimUsed = d;
+        console.log(`[DEBUG] SUCCESS: Using delimiter "${d}"`); // ADD THIS LINE
         return { mainPart, emailPart, delimUsed };
       }
       i = s.lastIndexOf(d, i - 1); // try the previous occurrence
