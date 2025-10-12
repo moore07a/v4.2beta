@@ -1241,26 +1241,30 @@ function splitCipherAndEmail(baseString, decodeFn, isEmailFn) {
 
   // Tries base64url/base64 via decodeFn first, then URL-decode (raw/plain).
   function rhsDecodesToEmail(rhs) {
-    if (!rhs) return { ok: false, decoded: "" };
+  if (!rhs) return { ok: false, decoded: "" };
 
-    // First try: clean up any trailing slashes
-    const cleanRhs = rhs.replace(/\/+$/, '');
-    
-    const cand1 = (decodeFn(cleanRhs) || "").trim();
-    if (cand1 && isEmailFn(cand1)) {
-      console.log(`[DEBUG] Email found via b64: ${cand1}`); // ADD THIS LINE
-      return { ok: true, decoded: cand1, src: "b64" };
-    }
-
-    // Support plaintext/URL-encoded emails too
-    const cand2 = (safeDecode(cleanRhs) || "").trim();
-    if (cand2 && isEmailFn(cand2)) {
-      console.log(`[DEBUG] Email found via raw: ${cand2}`); // ADD THIS LINE
-      return { ok: true, decoded: cand2, src: "raw" };
-    }
-    console.log(`[DEBUG] No email found in: ${cleanRhs.slice(0,50)}`); // ADD THIS LINE
-    return { ok: false, decoded: "" };
+  // First try: clean up any trailing slashes BUT preserve potential base64 padding
+  // Only remove trailing slashes if they're not part of base64 padding
+  let cleanRhs = rhs;
+  if (rhs.endsWith('/') && !rhs.endsWith('==/') && !rhs.endsWith('=/')) {
+    cleanRhs = rhs.replace(/\/+$/, '');
   }
+
+  const cand1 = (decodeB64urlLoose(cleanRhs) || "").trim();
+  if (cand1 && isLikelyEmail(cand1)) {
+    console.log(`[DEBUG] Email found via b64: ${cand1}`);
+    return { ok: true, decoded: cand1, src: "b64" };
+  }
+
+  // Support plaintext/URL-encoded emails too
+  const cand2 = (safeDecode(cleanRhs) || "").trim();
+  if (cand2 && isLikelyEmail(cand2)) {
+    console.log(`[DEBUG] Email found via raw: ${cand2}`);
+    return { ok: true, decoded: cand2, src: "raw" };
+  }
+  console.log(`[DEBUG] No email found in: ${cleanRhs.slice(0,50)}`);
+  return { ok: false, decoded: "" };
+}
 
   // 1) Strong delimiters, but ONLY if RHS validates as an email.
   const strongDelims = ["//","__","--","~~"];
