@@ -772,34 +772,62 @@ function logScannerHit(req, reason, nextEnc) {
 /* ========================================================================== */
 
 /* ================== Headless / bot heuristic ============================== */
-const UA_HEADLESS_MARKS = [
+const UA_HEADLESS_MARKS = [ 
   "headless","puppeteer","playwright","phantomjs","selenium","wdio","cypress",
   "curl","wget","python-requests","httpclient","okhttp","java","go-http-client",
   "libwww","aiohttp","node-fetch","powershell"
 ];
 const SUSPICIOUS_HEADERS = ["x-puppeteer","x-headless-browser","x-should-not-exist","x-playwright","x-automation","x-bot"];
+
 function headlessSuspicion(req){
   const reasons = [];
   const hard = [];
   const soft = [];
-  const ua = (req.get("user-agent")||"").toLowerCase();
 
+  const uaRaw = req.get("user-agent") || "";
+  const ua = uaRaw.toLowerCase();
+
+  // === NEW: Per-browser expectations (Chromium vs Safari/Firefox) - Note: Chrome on iOS identifies as "CriOS"; Safari does not send Client Hints or Sec-Fetch-* ===
+  const isChromiumUA = /\b(Chrome|CriOS|Edg|OPR|Brave)\b/i.test(uaRaw) && !/\bMobile Safari\b/i.test(uaRaw);
+  const isSafariUA   = /\bSafari\/\d+/i.test(uaRaw) && !/\b(Chrome|CriOS)\/\d+/i.test(uaRaw);
+  // (Optional) Basic Firefox detect to avoid expecting CH/Fetch there either
+  const isFirefoxUA  = /\bFirefox\/\d+/i.test(uaRaw);
+
+  const expect = {
+    clientHints: isChromiumUA,              // Safari/Firefox => false
+    fetchMeta:   isChromiumUA               // Safari/Firefox => false
+  };
+
+  // === Hard signals: explicit automation markers ===
   for (const m of UA_HEADLESS_MARKS) {
     if (ua.includes(m)) { reasons.push("ua:"+m); hard.push("ua:"+m); break; }
   }
   for (const h of SUSPICIOUS_HEADERS) {
     if (req.headers[h]) { reasons.push("hdr:"+h); hard.push("hdr:"+h); }
   }
-  // Standard browser headers often present (soft only)
+
+  // === Soft signals: common-but-not-guaranteed headers ===
   if (!req.get("accept-language")) { reasons.push("missing:accept-language"); soft.push("missing:accept-language"); }
-  if (!req.get("sec-ch-ua"))       { reasons.push("missing:sec-ch-ua");       soft.push("missing:sec-ch-ua"); }
-  if (!req.get("sec-fetch-site"))   { reasons.push("missing:sec-fetch-site");  soft.push("missing:sec-fetch-site"); }
-  // Accept header check: most browsers request html (hard)
+
+  // Only score Chromium-only headers if we EXPECT them for this UA family
+  if (expect.clientHints && !req.get("sec-ch-ua"))       { reasons.push("missing:sec-ch-ua");       soft.push("missing:sec-ch-ua"); }
+  if (expect.fetchMeta   && !req.get("sec-fetch-site"))   { reasons.push("missing:sec-fetch-site");  soft.push("missing:sec-fetch-site"); }
+
+  // === Hard signal: Accept not typical for browsers requesting HTML ===
   const accept = req.get("accept") || "";
   if (accept && !/text\/html|application\/xhtml\+xml/i.test(accept)) {
     reasons.push("accept-not-html"); hard.push("accept-not-html");
   }
-  return { suspicious: reasons.length>0, reasons, hardCount: hard.length, softCount: soft.length };
+
+  return { 
+    suspicious: reasons.length > 0, 
+    reasons, 
+    hardCount: hard.length, 
+    softCount: soft.length,
+    isSafariUA,
+    isFirefoxUA,
+    isChromiumUA
+  };
 }
 
 /* ================== AES-GCM decrypt (try all keys, instrumented) ========= */
@@ -1319,18 +1347,28 @@ if (scannerDetections.length > 0) {
 
   // Headless/bot heuristic
   const hs = headlessSuspicion(req);
-  if (hs.suspicious) {
-    addLog(`[HEADLESS] ip=${ip} reasons=${hs.reasons.join(',')}`);
-    if (hs.hardCount > 0) {
-      addStrike(ip, HEADLESS_STRIKE_WEIGHT);
-    } else if (HEADLESS_SOFT_STRIKE && hs.softCount >= 2) {
-      addStrike(ip, 1);
-    }
-    if (HEADLESS_BLOCK && hs.hardCount > 0) {
-      addSpacer();
-      return { blocked: true, status: 403, message: "Forbidden" };
-    }
+if (hs.suspicious) {
+  // NEW: choose a label based on signal strength and UA family
+  const softOnlyOne = (hs.hardCount === 0 && hs.softCount === 1);
+  const label = (hs.hardCount >= 1)                         ? 'HEADLESS'
+              : ((hs.isSafariUA || hs.isFirefoxUA) && softOnlyOne) ? 'INFO'     // pardon single soft miss on Safari/Firefox
+              : (hs.softCount >= 2)                          ? 'SUSPECT'
+              : 'INFO';
+
+  addLog(`[${label}] ip=${ip} reasons=${hs.reasons.join(',')}`);
+
+  // Keep your strike logic, but be gentler on soft-only/Safari cases
+  if (hs.hardCount > 0) {
+    addStrike(ip, HEADLESS_STRIKE_WEIGHT);
+  } else if (HEADLESS_SOFT_STRIKE && hs.softCount >= 2) {
+    addStrike(ip, 1);
   }
+
+  if (HEADLESS_BLOCK && hs.hardCount > 0) {
+    addSpacer();
+    return { blocked: true, status: 403, message: "Forbidden" };
+  }
+}
 
   // Geo/ASN blocking
   const ctry = getCountry(req);
