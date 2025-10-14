@@ -634,7 +634,7 @@ SCANNER_PATTERNS.push({
   type: "generic"
 });
 
-// External configuration support
+// External configuration for SCANNER DETECTION - Example:- https://yourcompany.com/scanner-config.json
 const EXTERNAL_SCANNER_CONFIG = process.env.SCANNER_CONFIG_URL || null;
 let dynamicScanners = [];
 
