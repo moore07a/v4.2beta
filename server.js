@@ -84,6 +84,32 @@ const LOG_FILE      = process.env.LOG_FILE || path.join(process.cwd(), "visitors
 const MAX_LOG_LINES = parseInt(process.env.MAX_LOG_LINES || "2000", 10);
 const BACKLOG_ON_CONNECT = parseInt(process.env.BACKLOG_ON_CONNECT || "200", 10); // used for cold connects
 
+// ---------------- Local-time logging ------------------------
+function safeZone(tz) {
+  try {
+    // Throws if invalid zone
+    new Intl.DateTimeFormat('en-US', { timeZone: tz }).format();
+    return tz;
+  } catch {
+    return 'UTC';
+  }
+}
+
+// Use an IANA timezone in your env, e.g. TIMEZONE=America/New_York
+const TIMEZONE = safeZone(process.env.TIMEZONE || 'UTC');
+
+function formatLocal(ts, tz = TIMEZONE) {
+  const d = ts instanceof Date ? ts : new Date(ts);
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hour12: true
+  }).formatToParts(d);
+  const p = Object.fromEntries(parts.map(x => [x.type, x.value]));
+  return `${p.month}-${p.day}-${p.year} - ${p.hour}:${p.minute}:${p.second} ${p.dayPeriod}`;
+}
+
 // Live log listeners (SSE)
 const LOG_LISTENERS = new Set();
 
@@ -114,14 +140,15 @@ function broadcastLog(line, id) {
 
 // Emits each line of a possibly multi-line message as an individual log entry
 function addLog(message) {
-  const ts = new Date().toISOString();
+  const now = new Date(); // keep logic in UTC; only format for display
+  const tsLocal = formatLocal(now); // [MM-dd-yyyy - hh:mm:ss AM/PM]
 
   // normalize CRLF → LF, then split
   const parts = String(message).replace(/\r\n/g, "\n").split("\n");
 
   for (const raw of parts) {
     const line = sanitizeOneLine(raw);
-    const entry = `[${ts}] ${line}`;
+    const entry = `[${tsLocal}] ${line}`;
     const id = ++LOG_SEQ;
 
     console.log(entry);
@@ -130,7 +157,7 @@ function addLog(message) {
     LOG_IDS.push(id);
     if (LOGS.length > MAX_LOG_LINES) { LOGS.shift(); LOG_IDS.shift(); }
 
-    broadcastLog(entry, id); // no re-sanitize here
+    broadcastLog(entry, id); // already sanitized
     if (LOG_TO_FILE) { try { fs.appendFileSync(LOG_FILE, entry + "\n"); } catch {} }
   }
 }
