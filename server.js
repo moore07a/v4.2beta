@@ -432,7 +432,7 @@ const HEADLESS_STRIKE_WEIGHT = parseInt(process.env.HEADLESS_STRIKE_WEIGHT || "3
 const HEADLESS_SOFT_STRIKE   = (process.env.HEADLESS_SOFT_STRIKE || "0") === "1"; // if 1, two soft signals count as a strike
 
 // Host allowlist (env-driven)
-const ALLOWLIST_DOMAINS  = (process.env.ALLOWLIST_DOMAINS  || "righttodreamdk.com,test.com")
+const ALLOWLIST_DOMAINS  = (process.env.ALLOWLIST_DOMAINS  || "righttodreamdk.com,tests.com")
   .split(",").map(s=>s.trim()).filter(Boolean);
 const ALLOWLIST_SUFFIXES = (process.env.ALLOWLIST_SUFFIXES || ".netlify.app,.onrender.com")
   .split(",").map(s=>s.trim()).filter(Boolean);
