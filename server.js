@@ -110,6 +110,37 @@ function formatLocal(ts, tz = TIMEZONE) {
   return `${p.month}-${p.day}-${p.year} - ${p.hour}:${p.minute}:${p.second} ${p.dayPeriod}`;
 }
 
+function zoneLabel(tz = TIMEZONE) {
+  const now = new Date();
+  try {
+    // Prefer numeric offset like "UTC-04:00"
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      timeZoneName: 'shortOffset' // e.g., "GMT-4"
+    }).formatToParts(now);
+
+    const name = parts.find(p => p.type === 'timeZoneName')?.value || '';
+    const utc = name.replace(/^GMT/, 'UTC'); // "GMT-4" -> "UTC-4"
+
+    const m = utc.match(/^UTC([+-])(\d{1,2})(?::?(\d{2}))?$/);
+    if (m) {
+      const sign = m[1];
+      const hh = String(m[2]).padStart(2, '0');
+      const mm = String(m[3] || '00').padStart(2, '0');
+      return `${tz} (UTC${sign}${hh}:${mm})`;
+    }
+    return `${tz} (${utc || 'UTC'})`;
+  } catch {
+    // Fallback to abbrev like "EDT", "CET"
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      timeZoneName: 'short'
+    }).formatToParts(now);
+    const abbr = parts.find(p => p.type === 'timeZoneName')?.value || tz;
+    return `${tz} (${abbr})`;
+  }
+}
+
 // Live log listeners (SSE)
 const LOG_LISTENERS = new Set();
 
@@ -1817,6 +1848,7 @@ app.get("/:data(*)", async (req, res) => {
 function startupSummary() {
   return [
     "🛡️ Security profile",
+    `  • Time: zone=${zoneLabel()}`,  // <-- added
     `  • Turnstile: enforceAction=${ENFORCE_ACTION} maxAgeSec=${MAX_TOKEN_AGE_SEC} expectHost=${EXPECT_HOSTNAME || "-"}`,
     `  • Turnstile sitekey=${mask(TURNSTILE_SITEKEY)} secret=${mask(TURNSTILE_SECRET)}`,
     `  • Geo: allow=[${ALLOWED_COUNTRIES.join(",")||"-"}] block=[${BLOCKED_COUNTRIES.join(",")||"-"}] asn=[${BLOCKED_ASNS.join(",")||"-"}]`,
