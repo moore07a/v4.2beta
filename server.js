@@ -205,16 +205,12 @@ function sseSend(res, text, id) {
 }
 
 function addSpacer() {
-  // keep console/file logs readable
   console.log("");
-  // assign an event id so LOGS and LOG_IDS stay aligned for backlog replay
   const id = ++LOG_SEQ;
   LOGS.push("");
   LOG_IDS.push(id);
-  if (LOG_TO_FILE) {
-    try { fs.appendFileSync(LOG_FILE, "\n"); } catch {}
-  }
-  // no broadcast for spacers; avoids flicker while still appearing in backlog
+  if (LOG_TO_FILE) { try { fs.appendFileSync(LOG_FILE, "\n"); } catch {} }
+  broadcastLog("", id); // <-- send a blank line to SSE clients too
 }
 
 /* ================== Let SSE accept Authorization *or* query token (admin or ephemeral) ================== */
