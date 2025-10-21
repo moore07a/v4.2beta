@@ -1136,35 +1136,42 @@ async function checkTurnstileReachable() {
   }
 }
 
-/* ---- Accept JSON or plaintext; always 204 Logs rich events as: "[TS-CLIENT:<phase>] ip=... ua="..." { .payload. }" Quietly drops empties (or logs them as [TS-CLIENT:empty] with len) ----- */
+/* -- Accept JSON or urlencoded; always 204 Logs rich events as: "[TS-CLIENT:<phase>] ip=.. ua=".." { .payload. }". For unknown bodies, logs [TS-CLIENT:empty] with content-type, length, and a short preview -- */
 app.post(
   "/ts-client-log",
+  // Keep raw text so we can parse ourselves (covers any content-type)
   express.text({ type: "*/*", limit: "64kb" }),
   (req, res) => {
-    const ip = getClientIp(req) || "unknown";
-    const ua = (req.get("user-agent") || "").slice(0, UA_TRUNCATE_LENGTH);
+    const ip  = getClientIp(req) || "unknown";
+    const ua  = (req.get("user-agent") || "").slice(0, UA_TRUNCATE_LENGTH);
+    const ct  = req.get("content-type") || "-";
     const len = req.get("content-length") || "0";
+    const raw = typeof req.body === "string" ? req.body : "";
 
     let payload = null;
-    try {
-      if (typeof req.body === "string" && req.body.trim()) {
-        payload = JSON.parse(req.body);
-      }
-    } catch {
-      // leave payload = null; non-JSON/garbage will be treated as empty noise
+    // 1) Try JSON parse first
+    if (raw && raw.trim()) {
+      try { payload = JSON.parse(raw); } catch { /* ignore */ }
     }
-    // If no JSON body or missing 'phase', treat as empty/noise
+    // 2) If not JSON, try urlencoded (some proxies/extensions rewrite bodies)
+    if ((!payload || typeof payload !== "object") && raw && raw.includes("=")) {
+      try {
+        const params = new URLSearchParams(raw);
+        const obj = {};
+        for (const [k, v] of params.entries()) obj[k] = v;
+        payload = obj;
+      } catch { /* ignore */ }
+    }
+    // 3) If still no usable payload with a phase, log as empty with preview
     if (!payload || typeof payload !== "object" || !payload.phase) {
-      // EITHER comment this out to drop silently…
-      addLog(`[TS-CLIENT:empty] ip=${ip} ua="${ua}" len=${len}`);
-      // …and do NOT add a spacer for empties
+      const preview = raw ? JSON.stringify(raw.slice(0, 200)) : '""';
+      addLog(`[TS-CLIENT:empty] ip=${ip} ua="${ua}" ct=${ct} len=${len} preview=${preview}`);
+      // no spacer for empties
       return res.status(204).end();
     }
-
     // Normal rich event
-    const phase = payload.phase;
-    addLog(`[TS-CLIENT:${phase}] ip=${ip} ua="${ua}" ${JSON.stringify(payload)}`);
-    addSpacer(); // keep your visual gap only for real events
+    addLog(`[TS-CLIENT:${payload.phase}] ip=${ip} ua="${ua}" ${JSON.stringify(payload)}`);
+    addSpacer(); // visual gap only for real events
     res.status(204).end();
   }
 );
