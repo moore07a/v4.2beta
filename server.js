@@ -1136,33 +1136,40 @@ async function checkTurnstileReachable() {
   }
 }
 
-/* ----------- Accept JSON or plaintext; always 204 - Writes "[TS-CLIENT:<phase>] ip=... ua="..." { ...payload... }" ----------- */
+/* ---- Accept JSON or plaintext; always 204 Logs rich events as: "[TS-CLIENT:<phase>] ip=... ua="..." { .payload. }" Quietly drops empties (or logs them as [TS-CLIENT:empty] with len) ----- */
 app.post(
   "/ts-client-log",
   express.text({ type: "*/*", limit: "64kb" }),
   (req, res) => {
     const ip = getClientIp(req) || "unknown";
     const ua = (req.get("user-agent") || "").slice(0, UA_TRUNCATE_LENGTH);
+    const len = req.get("content-length") || "0";
 
     let payload = null;
     try {
-      payload = typeof req.body === "string" && req.body.trim()
-        ? JSON.parse(req.body)
-        : (typeof req.body === "string" ? { message: req.body } : {});
+      if (typeof req.body === "string" && req.body.trim()) {
+        payload = JSON.parse(req.body);
+      }
     } catch {
-      // not JSON; keep as message
-      payload = { message: String(req.body || "").slice(0, LOG_ENTRY_MAX_LENGTH) };
+      // leave payload = null; non-JSON/garbage will be treated as empty noise
+    }
+    // If no JSON body or missing 'phase', treat as empty/noise
+    if (!payload || typeof payload !== "object" || !payload.phase) {
+      // EITHER comment this out to drop silently…
+      addLog(`[TS-CLIENT:empty] ip=${ip} ua="${ua}" len=${len}`);
+      // …and do NOT add a spacer for empties
+      return res.status(204).end();
     }
 
-    const phase = (payload && payload.phase) || "client";
+    // Normal rich event
+    const phase = payload.phase;
     addLog(`[TS-CLIENT:${phase}] ip=${ip} ua="${ua}" ${JSON.stringify(payload)}`);
-    addSpacer();
+    addSpacer(); // keep your visual gap only for real events
     res.status(204).end();
   }
 );
 
-// -------------------------------------------------------------
-
+/* --------------------- View-log -------------------------------- */
 app.get("/view-log", requireAdmin, (req, res) => {
   return res.type("text/plain").send(LOGS.join("\n") || "No logs yet.");
 });
