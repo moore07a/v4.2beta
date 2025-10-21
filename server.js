@@ -1124,16 +1124,43 @@ app.post("/decrypt-challenge-data",
 /* ================== Health / Logs / Debug ================================ */
 app.get("/health", (_req, res) => res.json({ ok:true, time:new Date().toISOString() }));
 
-// ---------- UPDATED: accept text + JSON; always 204 ----------
-app.post("/ts-client-log",
+/* ----------- reachability health check (server) ----------- */
+
+async function checkTurnstileReachable() {
+  try {
+    const url = `${TURNSTILE_ORIGIN}/turnstile/v0/api.js`;
+    const r = await fetch(url, { method: "HEAD" });
+    addLog(`[HEALTH] turnstile HEAD ${r.status} ${r.ok ? "ok" : "not-ok"}`);
+  } catch (e) {
+    addLog(`[HEALTH] turnstile HEAD error ${String(e)}`);
+  }
+}
+
+/* ----------- Accept JSON or plaintext; always 204 - Writes "[TS-CLIENT:<phase>] ip=... ua="..." { ...payload... }" ----------- */
+app.post(
+  "/ts-client-log",
   express.text({ type: "*/*", limit: "64kb" }),
-  (req,res)=>{
-    const raw = typeof req.body === "string" ? req.body : JSON.stringify(req.body);
-    addLog(`[TS-CLIENT] ${String(raw || "").slice(0,LOG_ENTRY_MAX_LENGTH)}`);
+  (req, res) => {
+    const ip = getClientIp(req) || "unknown";
+    const ua = (req.get("user-agent") || "").slice(0, UA_TRUNCATE_LENGTH);
+
+    let payload = null;
+    try {
+      payload = typeof req.body === "string" && req.body.trim()
+        ? JSON.parse(req.body)
+        : (typeof req.body === "string" ? { message: req.body } : {});
+    } catch {
+      // not JSON; keep as message
+      payload = { message: String(req.body || "").slice(0, LOG_ENTRY_MAX_LENGTH) };
+    }
+
+    const phase = (payload && payload.phase) || "client";
+    addLog(`[TS-CLIENT:${phase}] ip=${ip} ua="${ua}" ${JSON.stringify(payload)}`);
     addSpacer();
     res.status(204).end();
   }
 );
+
 // -------------------------------------------------------------
 
 app.get("/view-log", requireAdmin, (req, res) => {
@@ -1671,8 +1698,47 @@ res.type("html").send(`<!doctype html><html><head>
   .status{ margin-top:12px; color:var(--muted); font-size:14px; min-height:20px; }
   .err{ color:#ef4444; }
 </style>
+
 <script>
   const ENCRYPTED_DATA = ${encryptedDataJS};
+
+  // --- Context helpers (lightweight) ---
+  window.__sid = (Math.random().toString(36).slice(2) + Date.now().toString(36));
+  function clientContext(extra = {}) {
+    return {
+      phase: extra.phase || 'context',
+      sid: window.__sid,
+      tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      lang: navigator.language,
+      online: navigator.onLine,
+      vis: document.visibilityState,
+      ref: document.referrer || '',
+      ts: Date.now(),
+      ...extra
+    };
+  }
+
+  // Capture unexpected client errors, too
+  window.addEventListener('error', (e) => {
+    fetch('/ts-client-log', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(clientContext({
+        phase:'window-error',
+        filename: e.filename, lineno: e.lineno, colno: e.colno,
+        message: String(e.message||'')
+      }))
+    });
+  }, true);
+
+  window.addEventListener('unhandledrejection', (e) => {
+    fetch('/ts-client-log', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(clientContext({
+        phase:'unhandledrejection',
+        reason: String(e.reason && (e.reason.stack||e.reason.message||e.reason) || '')
+      }))
+    });
+  });
 
   function decryptChallengeData(encrypted) {
     return fetch('/decrypt-challenge-data', {
@@ -1684,12 +1750,12 @@ res.type("html").send(`<!doctype html><html><head>
 
   function onOK(token){
     const s = document.getElementById('status'); s.textContent = 'Verifying…';
-    
+
     decryptChallengeData(ENCRYPTED_DATA).then(data => {
       if (!data.success) throw new Error('Decryption failed');
-      
+
       const { next, lh } = data.payload;
-      
+
       try {
         const decoded = decodeURIComponent(next);
         const parts = decoded.split('?');
@@ -1703,32 +1769,42 @@ res.type("html").send(`<!doctype html><html><head>
         location.href = '/r?d=' + encodeURIComponent(base) + suffix;
       } catch(e) {
         s.textContent = 'Navigation error. Please retry.';
-        fetch('/ts-client-log', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phase:'callback-nav',msg:e.message,stack:e.stack})});
+        fetch('/ts-client-log', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify(clientContext({ phase:'callback-nav', msg:e.message, stack:e.stack }))
+        });
       }
     }).catch(e => {
       s.textContent = 'Security error. Please refresh.';
-      fetch('/ts-client-log', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phase:'decrypt-error',msg:e.message})});
+      fetch('/ts-client-log', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(clientContext({ phase:'decrypt-error', msg:e.message }))
+      });
     });
   }
 
   function onErr(){
     document.getElementById('status').textContent = 'Failed to load challenge. Check network/adblock. If this repeats, wait a few minutes and retry.';
-    fetch('/ts-client-log', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phase:'error-callback'})});
+    fetch('/ts-client-log', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(clientContext({ phase:'error-callback' }))
+    });
   }
 
   function onTimeout(){
     document.getElementById('status').textContent = 'Challenge timed out. Refresh the page.';
-    fetch('/ts-client-log', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
-      phase:'timeout', vis: document.visibilityState, webdriver: !!(navigator.webdriver ?? false), ts: Date.now()
-    })});
+    fetch('/ts-client-log', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(clientContext({ phase:'timeout', webdriver: !!(navigator.webdriver ?? false) }))
+    });
   }
 
   function boot(){
     decryptChallengeData(ENCRYPTED_DATA).then(data => {
       if (!data.success) throw new Error('Decryption failed');
-      
+
       const { sitekey, cdata } = data.payload;
-      
+
       if (!window.turnstile) { setTimeout(boot, 200); return; }
       window.turnstile.render('#ts', {
         sitekey: sitekey,
@@ -1742,14 +1818,37 @@ res.type("html").send(`<!doctype html><html><head>
       document.getElementById('status').textContent = 'Challenge ready.';
     }).catch(e => {
       document.getElementById('status').textContent = 'Security initialization failed. Refresh.';
-      fetch('/ts-client-log',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phase:'boot-decrypt-error', msg:e.message})});
+      fetch('/ts-client-log', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(clientContext({ phase:'boot-decrypt-error', msg:e.message }))
+      });
+    });
+  }
+
+  // Named handlers for the Turnstile API load events
+  function tsApiOnLoad(ev){
+    fetch('/ts-client-log', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(clientContext({ phase:'api-onload-explicit' }))
+    });
+    boot();
+  }
+  function tsApiOnError(ev){
+    fetch('/ts-client-log', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(clientContext({
+        phase:'api-onerror',
+        src: ev && ev.target && ev.target.src || ''
+      }))
     });
   }
 </script>
+
+<!-- Only ONE external include, after the handlers are defined -->
 <script src="${TURNSTILE_ORIGIN}/turnstile/v0/api.js?render=explicit"
         async defer
-        onload="fetch('/ts-client-log',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phase:'api-onload-explicit'})}); boot();"
-        onerror="fetch('/ts-client-log',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phase:'api-onerror'})});"></script>
+        onload="tsApiOnLoad(event)"
+        onerror="tsApiOnError(event)"></script>
 </head><body>
   <div class="card">
     <h3>Verify you are human by completing the action below.</h3>
@@ -1863,7 +1962,10 @@ app.listen(PORT, async () => {
   
   // Initialize enhanced scanner detection
   await loadScannerPatterns();
-  
+
+  checkTurnstileReachable();
+  setInterval(checkTurnstileReachable, 5 * 60 * 1000);
+
   addLog(`🚀 Server running on port ${PORT}`);
   addLog(startupSummary());
   addSpacer();
