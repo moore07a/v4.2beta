@@ -1135,43 +1135,56 @@ async function checkTurnstileReachable() {
     addLog(`[HEALTH] turnstile HEAD error ${String(e)}`);
   }
 }
-
-/* -- Accept JSON or urlencoded; always 204 Logs rich events as: "[TS-CLIENT:<phase>] ip=.. ua=".." { .payload. }". For unknown bodies, logs [TS-CLIENT:empty] with content-type, length, and a short preview -- */
+/* ----------- Accept JSON or urlencoded or pre-parsed JSON; always 204
+   Logs: "[TS-CLIENT:<phase>] ip=... ua="..." {payload}".
+   Falls back to [empty] with ct/len/preview when no usable payload. ----------- */
 app.post(
   "/ts-client-log",
-  // Keep raw text so we can parse ourselves (covers any content-type)
   express.text({ type: "*/*", limit: "64kb" }),
   (req, res) => {
     const ip  = getClientIp(req) || "unknown";
     const ua  = (req.get("user-agent") || "").slice(0, UA_TRUNCATE_LENGTH);
     const ct  = req.get("content-type") || "-";
     const len = req.get("content-length") || "0";
-    const raw = typeof req.body === "string" ? req.body : "";
 
     let payload = null;
-    // 1) Try JSON parse first
-    if (raw && raw.trim()) {
-      try { payload = JSON.parse(raw); } catch { /* ignore */ }
+
+    // CASE 1: upstream JSON parser already ran (req.body is an object)
+    if (req.body && typeof req.body === "object" && !Buffer.isBuffer(req.body)) {
+      payload = req.body;
+    } else {
+      // CASE 2: we have raw text; try to parse
+      const raw = typeof req.body === "string" ? req.body : "";
+
+      // 2a) JSON
+      if (raw && raw.trim()) {
+        try { payload = JSON.parse(raw); } catch { /* ignore */ }
+      }
+
+      // 2b) urlencoded (some proxies/extensions rewrite)
+      if ((!payload || typeof payload !== "object") && raw && raw.includes("=")) {
+        try {
+          const params = new URLSearchParams(raw);
+          const obj = {};
+          for (const [k, v] of params.entries()) obj[k] = v;
+          payload = obj;
+        } catch { /* ignore */ }
+      }
+
+      // for diagnostics if still nothing, compute a preview of the raw
+      if (!payload) req.__rawPreview = raw.slice(0, 200);
     }
-    // 2) If not JSON, try urlencoded (some proxies/extensions rewrite bodies)
-    if ((!payload || typeof payload !== "object") && raw && raw.includes("=")) {
-      try {
-        const params = new URLSearchParams(raw);
-        const obj = {};
-        for (const [k, v] of params.entries()) obj[k] = v;
-        payload = obj;
-      } catch { /* ignore */ }
-    }
-    // 3) If still no usable payload with a phase, log as empty with preview
+
     if (!payload || typeof payload !== "object" || !payload.phase) {
-      const preview = raw ? JSON.stringify(raw.slice(0, 200)) : '""';
+      const preview = req.__rawPreview != null
+        ? JSON.stringify(req.__rawPreview)
+        : (typeof req.body === "object" ? JSON.stringify(req.body).slice(0, 200) : '""');
       addLog(`[TS-CLIENT:empty] ip=${ip} ua="${ua}" ct=${ct} len=${len} preview=${preview}`);
-      // no spacer for empties
       return res.status(204).end();
     }
-    // Normal rich event
+
     addLog(`[TS-CLIENT:${payload.phase}] ip=${ip} ua="${ua}" ${JSON.stringify(payload)}`);
-    addSpacer(); // visual gap only for real events
+    addSpacer(); // spacer only for real events
     res.status(204).end();
   }
 );
