@@ -1134,11 +1134,22 @@ function parseDurationToMs(v, fallbackMs) {
 }
 
 // Defaults: 5 minutes interval, 2 hours heartbeat
-const HEALTH_INTERVAL_MS  = Math.max(60_000,  parseDurationToMs(process.env.HEALTH_INTERVAL  ?? "5m",  5 * 60_000));     // ≥ 1 min
-const HEALTH_HEARTBEAT_MS = Math.max(300_000, parseDurationToMs(process.env.HEALTH_HEARTBEAT ?? "2h",  2 * 60 * 60_000)); // ≥ 5 min
+const MIN_INTERVAL_MS  = process.env.NODE_ENV === "production" ? 60_000  : 1_000;  // 1s in dev
+const MIN_HEARTBEAT_MS = process.env.NODE_ENV === "production" ? 300_000 : 5_000;  // 5s in dev
+
+const HEALTH_INTERVAL_MS  = Math.max(MIN_INTERVAL_MS,  parseDurationToMs(process.env.HEALTH_INTERVAL  ?? "5m",  5 * 60_000));
+const HEALTH_HEARTBEAT_MS = Math.max(MIN_HEARTBEAT_MS, parseDurationToMs(process.env.HEALTH_HEARTBEAT ?? "2h",  2 * 60 * 60_000));
+
+// Pretty printer for ms → "Xs", "Ym", "Zh"
+function fmtDur(ms) {
+  if (ms < 1000)       return `${ms}ms`;
+  if (ms < 60_000)     return `${Math.round(ms/1000)}s`;
+  if (ms < 3_600_000)  return `${Math.round(ms/60_000)}m`;
+  return `${Math.round(ms/3_600_000)}h`;
+}
 
 // Optional: log effective settings at startup
-addLog(`ℹ️ Health check config: interval=${Math.round(HEALTH_INTERVAL_MS/60000)}m heartbeat=${Math.round(HEALTH_HEARTBEAT_MS/60000)}m`);
+addLog(`ℹ️ Health check config: interval=${fmtDur(HEALTH_INTERVAL_MS)} heartbeat=${fmtDur(HEALTH_HEARTBEAT_MS)}`);
 
 // ---- Turnstile health monitor (log-on-change + heartbeat) -------------------
 let _health = { ok: null, lastHeartbeat: 0, okStreak: 0, failStreak: 0, inflight: false };
