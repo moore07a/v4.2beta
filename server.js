@@ -2059,6 +2059,37 @@ app.get("/__debug/decrypt-manual", requireAdmin, (req, res) => {
   return res.json({ success: false, message: "All decryption attempts failed" });
 });
 
+// analyze-failing
+app.get("/__debug/analyze-failing", requireAdmin, (req, res) => {
+  const failingData = "MMpPGNj0FmFrCjDboOpO7MQc2Z5-D-23_AKC6JP1b8EovfQ6GsMWZZ3hIIZSDKSAjmhSmcfgEiWXU5p";
+  const workingData = "OfNs5fMG4FwIPOgAe9mms6a0HuNEoFfVkWA_E0pamKZ_LDZKMHz8K4Tm3cg_nVOl4eYX3O8WUfZSS5lFp0LZ";
+  
+  // Analyze character distribution
+  const analyzeChars = (str) => {
+    const chars = {};
+    for (const char of str) {
+      chars[char] = (chars[char] || 0) + 1;
+    }
+    return chars;
+  };
+  
+  res.json({
+    failing: {
+      length: failingData.length,
+      chars: analyzeChars(failingData),
+      base64urlValid: /^[A-Za-z0-9_-]+$/.test(failingData)
+    },
+    working: {
+      length: workingData.length,
+      chars: analyzeChars(workingData), 
+      base64urlValid: /^[A-Za-z0-9_-]+$/.test(workingData)
+    },
+    comparison: {
+      sameLength: failingData.length === workingData.length,
+      missingChars: workingData.length - failingData.length
+    }
+  });
+});
 /* ================== /r route — accepts full combined base in d ============ */
 app.get("/r", async (req, res) => {
   const baseString = safeDecode(String(req.query.d || ""));
