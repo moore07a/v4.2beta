@@ -1120,36 +1120,42 @@ app.post("/decrypt-challenge-data",
 
 /* ================== Health / Logs / Debug ================================ */
 app.get("/health", (_req, res) => res.json({ ok:true, time:new Date().toISOString() }));
-
-/* ================== - Accepts plain numbers (treated as minutes) or units: ms, s, m, h  (e.g., "2h", "45m", "90s") ================== */
-function parseDurationToMs(v, fallbackMs) {
+/* ===== Duration parsing: supports plain numbers (minutes) or units m/h only ===== */
+function parseMinHourToMs(v, fallbackMs) {
   const s = String(v ?? "").trim().toLowerCase();
   if (!s) return fallbackMs;
-  const m = s.match(/^(\d+)\s*(ms|s|m|h)?$/);
+  // plain minutes (no unit) or explicit m/h
+  const m = s.match(/^(\d+)\s*(m|h)?$/);
   if (!m) return fallbackMs;
   const n = parseInt(m[1], 10);
-  const unit = m[2] || "m"; // default minutes if unit omitted
-  const mult = unit === "ms" ? 1 : unit === "s" ? 1000 : unit === "h" ? 3600000 : 60000;
+  const unit = m[2] || "m";           // default to minutes if omitted
+  const mult = unit === "h" ? 60 * 60 * 1000 : 60 * 1000;  // m -> 60k, h -> 3.6M
   return n * mult;
 }
 
-// Defaults: 5 minutes interval, 2 hours heartbeat
-const MIN_INTERVAL_MS  = process.env.NODE_ENV === "production" ? 60_000  : 1_000;  // 1s in dev
-const MIN_HEARTBEAT_MS = process.env.NODE_ENV === "production" ? 300_000 : 5_000;  // 5s in dev
+// Floors (no seconds): ≥1m interval, ≥5m heartbeat in production; looser in dev if you want
+const MIN_INTERVAL_MS  = process.env.NODE_ENV === "production" ? 60 * 1000 : 60 * 1000;   // 1 min in both
+const MIN_HEARTBEAT_MS = process.env.NODE_ENV === "production" ? 5  * 60 * 1000 : 5 * 60 * 1000; // 5 min in both
 
-const HEALTH_INTERVAL_MS  = Math.max(MIN_INTERVAL_MS,  parseDurationToMs(process.env.HEALTH_INTERVAL  ?? "5m",  5 * 60_000));
-const HEALTH_HEARTBEAT_MS = Math.max(MIN_HEARTBEAT_MS, parseDurationToMs(process.env.HEALTH_HEARTBEAT ?? "2h",  2 * 60 * 60_000));
+const HEALTH_INTERVAL_MS  = Math.max(
+  MIN_INTERVAL_MS,
+  parseMinHourToMs(process.env.HEALTH_INTERVAL  ?? "5m",  5 * 60 * 1000)
+);
 
-// Pretty printer for ms → "Xs", "Ym", "Zh"
-function fmtDur(ms) {
-  if (ms < 1000)       return `${ms}ms`;
-  if (ms < 60_000)     return `${Math.round(ms/1000)}s`;
-  if (ms < 3_600_000)  return `${Math.round(ms/60_000)}m`;
-  return `${Math.round(ms/3_600_000)}h`;
+const HEALTH_HEARTBEAT_MS = Math.max(
+  MIN_HEARTBEAT_MS,
+  parseMinHourToMs(process.env.HEALTH_HEARTBEAT ?? "2h",  2 * 60 * 60 * 1000)
+);
+
+// Pretty printer for ms → "Xm" or "Yh"
+function fmtDurMH(ms) {
+  const minutes = Math.round(ms / 60000);
+  if (minutes % 60 === 0) return `${minutes / 60}h`;
+  return `${minutes}m`;
 }
 
-// Optional: log effective settings at startup
-addLog(`ℹ️ Health check config: interval=${fmtDur(HEALTH_INTERVAL_MS)} heartbeat=${fmtDur(HEALTH_HEARTBEAT_MS)}`);
+// Log effective settings (human-friendly, mins/hours only)
+addLog(`ℹ️ Health check config: interval=${fmtDurMH(HEALTH_INTERVAL_MS)} heartbeat=${fmtDurMH(HEALTH_HEARTBEAT_MS)}`);
 
 // ---- Turnstile health monitor (log-on-change + heartbeat) -------------------
 let _health = { ok: null, lastHeartbeat: 0, okStreak: 0, failStreak: 0, inflight: false };
@@ -1189,7 +1195,6 @@ async function checkTurnstileReachable() {
     _health.inflight = false;
   }
 }
-
 /* ----------- Accept JSON or urlencoded or pre-parsed JSON; always 204
    Logs: "[TS-CLIENT:<phase>] ip=... ua="..." {payload}".
    Falls back to [empty] with ct/len/preview when no usable payload. ----------- */
