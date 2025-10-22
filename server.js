@@ -1121,20 +1121,30 @@ app.post("/decrypt-challenge-data",
 /* ================== Health / Logs / Debug ================================ */
 app.get("/health", (_req, res) => res.json({ ok:true, time:new Date().toISOString() }));
 
-// ---- Turnstile health monitor (log-on-change + heartbeat) -------------------
-const HEALTH_INTERVAL_MS   = 5 * 60 * 1000;   // run check every 5 minutes
-const HEALTH_HEARTBEAT_MS  = 30 * 60 * 1000;  // emit a heartbeat at most every 30 minutes
+/* ================== - Accepts plain numbers (treated as minutes) or units: ms, s, m, h  (e.g., "2h", "45m", "90s") ================== */
+function parseDurationToMs(v, fallbackMs) {
+  const s = String(v ?? "").trim().toLowerCase();
+  if (!s) return fallbackMs;
+  const m = s.match(/^(\d+)\s*(ms|s|m|h)?$/);
+  if (!m) return fallbackMs;
+  const n = parseInt(m[1], 10);
+  const unit = m[2] || "m"; // default minutes if unit omitted
+  const mult = unit === "ms" ? 1 : unit === "s" ? 1000 : unit === "h" ? 3600000 : 60000;
+  return n * mult;
+}
 
-let _health = {
-  ok: null,                // last known status: true/false/null (unknown)
-  lastHeartbeat: 0,        // timestamp of last heartbeat log
-  okStreak: 0,             // consecutive OKs
-  failStreak: 0,           // consecutive fails
-  inflight: false,         // avoid overlapping checks
-};
+// Defaults: 5 minutes interval, 2 hours heartbeat
+const HEALTH_INTERVAL_MS  = Math.max(60_000,  parseDurationToMs(process.env.HEALTH_INTERVAL  ?? "5m",  5 * 60_000));     // ≥ 1 min
+const HEALTH_HEARTBEAT_MS = Math.max(300_000, parseDurationToMs(process.env.HEALTH_HEARTBEAT ?? "2h",  2 * 60 * 60_000)); // ≥ 5 min
+
+// Optional: log effective settings at startup
+addLog(`ℹ️ Health check config: interval=${Math.round(HEALTH_INTERVAL_MS/60000)}m heartbeat=${Math.round(HEALTH_HEARTBEAT_MS/60000)}m`);
+
+// ---- Turnstile health monitor (log-on-change + heartbeat) -------------------
+let _health = { ok: null, lastHeartbeat: 0, okStreak: 0, failStreak: 0, inflight: false };
 
 async function checkTurnstileReachable() {
-  if (_health.inflight) return;      // don’t overlap if a slow network call
+  if (_health.inflight) return;
   _health.inflight = true;
 
   const now = Date.now();
@@ -1149,12 +1159,10 @@ async function checkTurnstileReachable() {
     if (_health.ok !== ok) {
       addLog(`[HEALTH] turnstile HEAD ${r.status} ${ok ? "ok" : "not-ok"} (change)`);
       _health.ok = ok;
-      _health.lastHeartbeat = now;   // reset heartbeat window
-    } else {
-      if (now - _health.lastHeartbeat >= HEALTH_HEARTBEAT_MS) {
-        addLog(`[HEALTH] heartbeat status=${ok ? "ok" : "not-ok"} okStreak=${_health.okStreak} failStreak=${_health.failStreak}`);
-        _health.lastHeartbeat = now;
-      }
+      _health.lastHeartbeat = now;
+    } else if (now - _health.lastHeartbeat >= HEALTH_HEARTBEAT_MS) {
+      addLog(`[HEALTH] heartbeat status=${ok ? "ok" : "not-ok"} okStreak=${_health.okStreak} failStreak=${_health.failStreak}`);
+      _health.lastHeartbeat = now;
     }
   } catch (e) {
     _health.failStreak++; _health.okStreak = 0;
