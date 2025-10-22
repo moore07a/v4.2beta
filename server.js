@@ -725,9 +725,6 @@ function detectScannerEnhanced(req) {
   
   return detected.sort((a, b) => b.confidence - a.confidence);
 }
-
-/* ========================================================================== */
-
 /* ================== Scanner logging helper (inserted) - scanner logging helper (counts + rich log line) ===================== */
 const SCANNER_STATS = { total: 0, byReason: Object.create(null), byUA: Object.create(null) };
 
@@ -1124,17 +1121,56 @@ app.post("/decrypt-challenge-data",
 /* ================== Health / Logs / Debug ================================ */
 app.get("/health", (_req, res) => res.json({ ok:true, time:new Date().toISOString() }));
 
-/* ----------- reachability health check (server) ----------- */
+// ---- Turnstile health monitor (log-on-change + heartbeat) -------------------
+const HEALTH_INTERVAL_MS   = 5 * 60 * 1000;   // run check every 5 minutes
+const HEALTH_HEARTBEAT_MS  = 30 * 60 * 1000;  // emit a heartbeat at most every 30 minutes
+
+let _health = {
+  ok: null,                // last known status: true/false/null (unknown)
+  lastHeartbeat: 0,        // timestamp of last heartbeat log
+  okStreak: 0,             // consecutive OKs
+  failStreak: 0,           // consecutive fails
+  inflight: false,         // avoid overlapping checks
+};
 
 async function checkTurnstileReachable() {
+  if (_health.inflight) return;      // don’t overlap if a slow network call
+  _health.inflight = true;
+
+  const now = Date.now();
   try {
     const url = `${TURNSTILE_ORIGIN}/turnstile/v0/api.js`;
     const r = await fetch(url, { method: "HEAD" });
-    addLog(`[HEALTH] turnstile HEAD ${r.status} ${r.ok ? "ok" : "not-ok"}`);
+    const ok = r.ok;
+
+    if (ok) { _health.okStreak++; _health.failStreak = 0; }
+    else    { _health.failStreak++; _health.okStreak  = 0; }
+
+    if (_health.ok !== ok) {
+      addLog(`[HEALTH] turnstile HEAD ${r.status} ${ok ? "ok" : "not-ok"} (change)`);
+      _health.ok = ok;
+      _health.lastHeartbeat = now;   // reset heartbeat window
+    } else {
+      if (now - _health.lastHeartbeat >= HEALTH_HEARTBEAT_MS) {
+        addLog(`[HEALTH] heartbeat status=${ok ? "ok" : "not-ok"} okStreak=${_health.okStreak} failStreak=${_health.failStreak}`);
+        _health.lastHeartbeat = now;
+      }
+    }
   } catch (e) {
-    addLog(`[HEALTH] turnstile HEAD error ${String(e)}`);
+    _health.failStreak++; _health.okStreak = 0;
+    if (_health.ok !== false) {
+      addLog(`[HEALTH] turnstile HEAD error ${String(e)} (change)`);
+      _health.ok = false;
+      _health.lastHeartbeat = now;
+    } else if (now - _health.lastHeartbeat >= HEALTH_HEARTBEAT_MS) {
+      addLog(`[HEALTH] heartbeat status=not-ok okStreak=${_health.okStreak} failStreak=${_health.failStreak}`);
+      _health.lastHeartbeat = now;
+    }
+  } finally {
+    _health.inflight = false;
   }
 }
+
 /* ----------- Accept JSON or urlencoded or pre-parsed JSON; always 204
    Logs: "[TS-CLIENT:<phase>] ip=... ua="..." {payload}".
    Falls back to [empty] with ct/len/preview when no usable payload. ----------- */
@@ -1991,7 +2027,7 @@ app.listen(PORT, async () => {
   await loadScannerPatterns();
 
   checkTurnstileReachable();
-  setInterval(checkTurnstileReachable, 5 * 60 * 1000);
+  setInterval(checkTurnstileReachable, HEALTH_INTERVAL_MS);
 
   addLog(`🚀 Server running on port ${PORT}`);
   addLog(startupSummary());
