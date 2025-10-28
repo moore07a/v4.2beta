@@ -1724,13 +1724,16 @@ app.get("/challenge", limitChallengeView, (req, res) => {
 
   res.setHeader("Cache-Control", "no-store");
   res.setHeader("Content-Security-Policy", [
-    "default-src 'self'",
-    `script-src 'self' 'unsafe-inline' ${TURNSTILE_ORIGIN}`,
-    `frame-src ${TURNSTILE_ORIGIN}`,
-    "style-src 'self' 'unsafe-inline'",
-    "img-src 'self' data:",
-    "connect-src 'self' https:",
-  ].join("; "));
+  "default-src 'self'",
+  `script-src 'self' 'unsafe-inline' 'unsafe-eval' https://challenges.cloudflare.com`,
+  `frame-src 'self' https://challenges.cloudflare.com https://*.cloudflare.com`,
+  "style-src 'self' 'unsafe-inline' https://challenges.cloudflare.com",
+  "img-src 'self' data: https:",
+  "connect-src 'self' https://challenges.cloudflare.com https://*.cloudflare.com",
+  "font-src 'self' data: https:",
+  "worker-src 'self' blob:",
+  "child-src 'self' https://challenges.cloudflare.com"
+].join("; "));
 
     // ENCRYPT all sensitive data instead of exposing in plaintext
   const challengePayload = {
@@ -1870,13 +1873,28 @@ res.type("html").send(`<!doctype html><html><head>
     });
   }
 
-  function onErr(){
-    document.getElementById('status').textContent = 'Failed to load challenge. Check network/adblock. If this repeats, wait a few minutes and retry.';
-    fetch('/ts-client-log', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(clientContext({ phase:'error-callback' }))
-    });
-  }
+  function onErr(errorCode) {
+  const statusEl = document.getElementById('status');
+  const errorMessages = {
+    'undefined': 'Challenge failed to initialize',
+    'network-error': 'Network connection issue',
+    'invalid-input': 'Invalid configuration',
+    'internal-error': 'Internal error - please refresh'
+  };
+  
+  const message = errorMessages[errorCode] || `Error: ${errorCode}`;
+  statusEl.textContent = message + ' - Please refresh the page.';
+  
+  fetch('/ts-client-log', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(clientContext({ 
+      phase: 'turnstile-error-callback', 
+      errorCode: errorCode,
+      userAction: 'informed'
+    }))
+  });
+}
 
   function onTimeout(){
     document.getElementById('status').textContent = 'Challenge timed out. Refresh the page.';
@@ -1886,13 +1904,28 @@ res.type("html").send(`<!doctype html><html><head>
     });
   }
 
-  function boot(){
-    decryptChallengeData(ENCRYPTED_DATA).then(data => {
-      if (!data.success) throw new Error('Decryption failed');
+  function boot() {
+  const statusEl = document.getElementById('status');
+  
+  // Check if DOM is ready
+  if (!document.getElementById('ts')) {
+    statusEl.textContent = 'Page loading...';
+    setTimeout(boot, 100);
+    return;
+  }
 
-      const { sitekey, cdata } = data.payload;
+  decryptChallengeData(ENCRYPTED_DATA).then(data => {
+    if (!data.success) throw new Error('Decryption failed');
 
-      if (!window.turnstile) { setTimeout(boot, 200); return; }
+    const { sitekey, cdata } = data.payload;
+
+    if (!window.turnstile) {
+      statusEl.textContent = 'Security module loading...';
+      setTimeout(boot, 200);
+      return;
+    }
+
+    try {
       window.turnstile.render('#ts', {
         sitekey: sitekey,
         action: 'link_redirect',
@@ -1902,15 +1935,29 @@ res.type("html").send(`<!doctype html><html><head>
         'error-callback': onErr,
         'timeout-callback': onTimeout
       });
-      document.getElementById('status').textContent = 'Challenge ready.';
-    }).catch(e => {
-      document.getElementById('status').textContent = 'Security initialization failed. Refresh.';
+      
+      statusEl.textContent = 'Challenge ready.';
+      
+    } catch (renderError) {
+      console.error('Turnstile render failed:', renderError);
+      statusEl.textContent = 'Error loading challenge. Refreshing...';
       fetch('/ts-client-log', {
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify(clientContext({ phase:'boot-decrypt-error', msg:e.message }))
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(clientContext({ 
+          phase: 'render-error', 
+          error: String(renderError),
+          turnstileReady: !!window.turnstile
+        }))
       });
-    });
-  }
+      setTimeout(() => location.reload(), 3000);
+    }
+    
+  }).catch(e => {
+    statusEl.textContent = 'Security initialization failed. Refresh.';
+    console.error('Boot error:', e);
+  });
+}
 
   // Named handlers for the Turnstile API load events
   function tsApiOnLoad(ev){
