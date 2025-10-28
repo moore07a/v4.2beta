@@ -1862,7 +1862,8 @@ function startupSummary() {
     `  • Bans: ttl=${BAN_TTL_SEC}s threshold=${BAN_AFTER_STRIKES} hpWeight=${STRIKE_WEIGHT_HP}`,
     `  • Allowlist: exact=[${ALLOWLIST_DOMAINS.join(",")||"-"}] suffix=[${ALLOWLIST_SUFFIXES.join(",")||"-"}]`,
     `  • Challenge security: rateLimit=5/5min tokens=10min`,
-    `  • Geo fallback active=${Boolean(geoip)}`
+    `  • Geo fallback active=${Boolean(geoip)}`,
+    `  • Health: interval=${fmtDurMH(HEALTH_INTERVAL_MS)} heartbeat=${fmtDurMH(HEALTH_HEARTBEAT_MS)}`  // ← Add this line
   ].join("\n");
 }
 
@@ -1909,6 +1910,9 @@ app.listen(PORT, async () => {
   if (geoip) addLog("ℹ️ geoip-lite enabled as country fallback");
   
   await loadScannerPatterns();
+
+  // Add the health config log here, after all constants are defined
+  addLog(`ℹ️ Health check config: interval=${fmtDurMH(HEALTH_INTERVAL_MS)} heartbeat=${fmtDurMH(HEALTH_HEARTBEAT_MS)}`);
 
   checkTurnstileReachable();
   setInterval(checkTurnstileReachable, HEALTH_INTERVAL_MS);
