@@ -1724,16 +1724,13 @@ app.get("/challenge", limitChallengeView, (req, res) => {
 
   res.setHeader("Cache-Control", "no-store");
   res.setHeader("Content-Security-Policy", [
-  "default-src 'self'",
-  `script-src 'self' 'unsafe-inline' 'unsafe-eval' https://challenges.cloudflare.com`,
-  `frame-src 'self' https://challenges.cloudflare.com https://*.cloudflare.com`,
-  "style-src 'self' 'unsafe-inline' https://challenges.cloudflare.com",
-  "img-src 'self' data: https:",
-  "connect-src 'self' https://challenges.cloudflare.com https://*.cloudflare.com",
-  "font-src 'self' data: https:",
-  "worker-src 'self' blob:",
-  "child-src 'self' https://challenges.cloudflare.com"
-].join("; "));
+    "default-src 'self'",
+    `script-src 'self' 'unsafe-inline' ${TURNSTILE_ORIGIN}`,
+    `frame-src ${TURNSTILE_ORIGIN}`,
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data:",
+    "connect-src 'self' https:",
+  ].join("; "));
 
     // ENCRYPT all sensitive data instead of exposing in plaintext
   const challengePayload = {
@@ -1747,7 +1744,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   const encryptedData = encryptChallengeData(challengePayload);
   const encryptedDataJS = JSON.stringify(encryptedData);
 
-const htmlContent = `<!doctype html><html><head>
+res.type("html").send(`<!doctype html><html><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
@@ -1790,7 +1787,7 @@ const htmlContent = `<!doctype html><html><head>
 </style>
 
 <script>
-  const ENCRYPTED_DATA = ${JSON.stringify(encryptedData)};
+  const ENCRYPTED_DATA = ${encryptedDataJS};
 
   // --- Context helpers (lightweight) ---
   window.__sid = (Math.random().toString(36).slice(2) + Date.now().toString(36));
@@ -1948,9 +1945,8 @@ const htmlContent = `<!doctype html><html><head>
     <noscript><p class="err">Turnstile requires JavaScript. Please enable JS and refresh.</p></noscript>
     <p class="muted" style="margin-top:18px">Protected by Cloudflare Turnstile</p>
   </div>
-</body></html>`;
-
-res.type("html").send(htmlContent);
+</body></html>`);
+});
 
 /* ============== INSERTED: Email-safe path — always show interstitial ================== */
 app.get("/e/:data(*)", (req, res) => {
