@@ -80,18 +80,7 @@ if (!TURNSTILE_SITEKEY || !TURNSTILE_SECRET) {
 
 // ================== ADD VALIDATION RIGHT HERE ==================
 function validateTurnstileKeys() {
-  if (TURNSTILE_SITEKEY.length < 30) {
-    console.error(`❌ TURNSTILE_SITEKEY too short: ${TURNSTILE_SITEKEY.length} chars (expected ~40)`);
-    console.error(`   Current: ${TURNSTILE_SITEKEY}`);
-    return false;
-  }
-  
-  if (TURNSTILE_SECRET.length < 30) {
-    console.error(`❌ TURNSTILE_SECRET too short: ${TURNSTILE_SECRET.length} chars (expected ~40)`);
-    console.error(`   Current: ${TURNSTILE_SECRET}`);
-    return false;
-  }
-  
+  // Only check for basic validity, not length
   if (!TURNSTILE_SITEKEY.startsWith('0x') || !TURNSTILE_SECRET.startsWith('0x')) {
     console.error(`❌ Turnstile keys should start with '0x'`);
     return false;
