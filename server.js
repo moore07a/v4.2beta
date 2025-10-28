@@ -78,6 +78,35 @@ if (!TURNSTILE_SITEKEY || !TURNSTILE_SECRET) {
   process.exit(1);
 }
 
+// ================== ADD VALIDATION RIGHT HERE ==================
+function validateTurnstileKeys() {
+  if (TURNSTILE_SITEKEY.length < 30) {
+    console.error(`❌ TURNSTILE_SITEKEY too short: ${TURNSTILE_SITEKEY.length} chars (expected ~40)`);
+    console.error(`   Current: ${TURNSTILE_SITEKEY}`);
+    return false;
+  }
+  
+  if (TURNSTILE_SECRET.length < 30) {
+    console.error(`❌ TURNSTILE_SECRET too short: ${TURNSTILE_SECRET.length} chars (expected ~40)`);
+    console.error(`   Current: ${TURNSTILE_SECRET}`);
+    return false;
+  }
+  
+  if (!TURNSTILE_SITEKEY.startsWith('0x') || !TURNSTILE_SECRET.startsWith('0x')) {
+    console.error(`❌ Turnstile keys should start with '0x'`);
+    return false;
+  }
+  
+  console.log(`✅ Turnstile keys validated: sitekey=${TURNSTILE_SITEKEY.length} chars, secret=${TURNSTILE_SECRET.length} chars`);
+  return true;
+}
+
+// Call this before server starts
+if (!validateTurnstileKeys()) {
+  console.error("Please check your TURNSTILE_SITEKEY and TURNSTILE_SECRET environment variables");
+  process.exit(1);
+}
+
 /* ================== Logging (memory-first, optional disk) ================== */
 const LOG_TO_FILE   = process.env.LOG_TO_FILE === "1";
 const LOG_FILE      = process.env.LOG_FILE || path.join(process.cwd(), "visitors.log");
