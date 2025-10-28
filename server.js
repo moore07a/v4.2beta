@@ -1835,6 +1835,20 @@ app.get("/:data(*)", async (req, res) => {
   return handleRedirectCore(req, res, cleanPath);
 });
 
+// ================== HEALTH CHECK CONSTANTS ==================
+const MIN_INTERVAL_MS  = process.env.NODE_ENV === "production" ? 60 * 1000 : 60 * 1000;
+const MIN_HEARTBEAT_MS = process.env.NODE_ENV === "production" ? 5  * 60 * 1000 : 5 * 60 * 1000;
+
+const HEALTH_INTERVAL_MS  = Math.max(
+  MIN_INTERVAL_MS,
+  parseMinHourToMs(process.env.HEALTH_INTERVAL  ?? "5m",  5 * 60 * 1000)
+);
+
+const HEALTH_HEARTBEAT_MS = Math.max(
+  MIN_HEARTBEAT_MS,
+  parseMinHourToMs(process.env.HEALTH_HEARTBEAT ?? "2h",  2 * 60 * 60 * 1000)
+);
+
 // ================== STARTUP & HEALTH CHECKS ==================
 function startupSummary() {
   return [
@@ -1851,19 +1865,6 @@ function startupSummary() {
     `  • Geo fallback active=${Boolean(geoip)}`
   ].join("\n");
 }
-
-const MIN_INTERVAL_MS  = process.env.NODE_ENV === "production" ? 60 * 1000 : 60 * 1000;
-const MIN_HEARTBEAT_MS = process.env.NODE_ENV === "production" ? 5  * 60 * 1000 : 5 * 60 * 1000;
-
-const HEALTH_INTERVAL_MS  = Math.max(
-  MIN_INTERVAL_MS,
-  parseMinHourToMs(process.env.HEALTH_INTERVAL  ?? "5m",  5 * 60 * 1000)
-);
-
-const HEALTH_HEARTBEAT_MS = Math.max(
-  MIN_HEARTBEAT_MS,
-  parseMinHourToMs(process.env.HEALTH_HEARTBEAT ?? "2h",  2 * 60 * 60 * 1000)
-);
 
 let _health = { ok: null, lastHeartbeat: 0, okStreak: 0, failStreak: 0, inflight: false };
 
