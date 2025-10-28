@@ -1726,14 +1726,14 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   // Updated CSP for Turnstile compatibility
   res.setHeader("Content-Security-Policy", [
     "default-src 'self'",
-    `script-src 'self' 'unsafe-inline' 'unsafe-eval' https://challenges.cloudflare.com`,
-    `frame-src 'self' https://challenges.cloudflare.com https://*.cloudflare.com`,
-    "style-src 'self' 'unsafe-inline' https://challenges.cloudflare.com",
+    `script-src 'self' 'unsafe-inline' 'unsafe-eval' https://challenges.cloudflare.com https://*.cloudflare.com`,
+    `frame-src 'self' https://challenges.cloudflare.com https://*.cloudflare.com https://cloudflare.com`,
+    "style-src 'self' 'unsafe-inline' https://challenges.cloudflare.com https://*.cloudflare.com",
     "img-src 'self' data: https:",
-    "connect-src 'self' https://challenges.cloudflare.com https://*.cloudflare.com",
+    "connect-src 'self' https://challenges.cloudflare.com https://*.cloudflare.com https://cloudflare.com",
     "font-src 'self' data: https:",
-    "worker-src 'self' blob:",
-    "child-src 'self' https://challenges.cloudflare.com"
+    "worker-src 'self' blob: https:",
+    "child-src 'self' https://challenges.cloudflare.com https://*.cloudflare.com"
   ].join("; "));
 
   // ENCRYPT all sensitive data instead of exposing in plaintext
@@ -1746,7 +1746,6 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   };
   
   const encryptedData = encryptChallengeData(challengePayload);
-  const encryptedDataJS = JSON.stringify(encryptedData);
 
   const htmlContent = `<!doctype html><html><head>
 <meta charset="utf-8">
@@ -1788,6 +1787,11 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   #ts{ display:inline-block; margin-top:12px; }
   .status{ margin-top:12px; color:var(--muted); font-size:14px; min-height:20px; }
   .err{ color:#ef4444; }
+  .retry-btn{ 
+    margin-top:12px; padding:8px 16px; background:#0ea5e9; color:white; 
+    border:none; border-radius:4px; cursor:pointer; font-size:14px;
+  }
+  .retry-btn:hover{ background:#0284c7; }
 </style>
 
 <script>
@@ -1809,6 +1813,10 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     };
   }
 
+  // Enhanced error tracking
+  let turnstileErrorCount = 0;
+  const MAX_RETRIES = 2;
+
   // Capture unexpected client errors, too
   window.addEventListener('error', (e) => {
     fetch('/ts-client-log', {
@@ -1816,7 +1824,8 @@ app.get("/challenge", limitChallengeView, (req, res) => {
       body: JSON.stringify(clientContext({
         phase:'window-error',
         filename: e.filename, lineno: e.lineno, colno: e.colno,
-        message: String(e.message||'')
+        message: String(e.message||''),
+        errorCount: turnstileErrorCount
       }))
     });
   }, true);
@@ -1826,7 +1835,8 @@ app.get("/challenge", limitChallengeView, (req, res) => {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify(clientContext({
         phase:'unhandledrejection',
-        reason: String(e.reason && (e.reason.stack||e.reason.message||e.reason) || '')
+        reason: String(e.reason && (e.reason.stack||e.reason.message||e.reason) || ''),
+        errorCount: turnstileErrorCount
       }))
     });
   });
@@ -1840,7 +1850,9 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   }
 
   function onOK(token){
-    const s = document.getElementById('status'); s.textContent = 'Verifying…';
+    const s = document.getElementById('status'); 
+    s.textContent = 'Verifying…';
+    s.style.color = '';
 
     decryptChallengeData(ENCRYPTED_DATA).then(data => {
       if (!data.success) throw new Error('Decryption failed');
@@ -1860,60 +1872,151 @@ app.get("/challenge", limitChallengeView, (req, res) => {
         location.href = '/r?d=' + encodeURIComponent(base) + suffix;
       } catch(e) {
         s.textContent = 'Navigation error. Please retry.';
+        s.style.color = '#ef4444';
         fetch('/ts-client-log', {
           method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify(clientContext({ phase:'callback-nav', msg:e.message, stack:e.stack }))
+          body: JSON.stringify(clientContext({ 
+            phase:'callback-nav', 
+            msg:e.message, 
+            stack:e.stack,
+            errorCount: turnstileErrorCount
+          }))
         });
       }
     }).catch(e => {
       s.textContent = 'Security error. Please refresh.';
+      s.style.color = '#ef4444';
       fetch('/ts-client-log', {
         method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify(clientContext({ phase:'decrypt-error', msg:e.message }))
+        body: JSON.stringify(clientContext({ 
+          phase:'decrypt-error', 
+          msg:e.message,
+          errorCount: turnstileErrorCount 
+        }))
       });
     });
   }
 
-  function onErr(){
-    document.getElementById('status').textContent = 'Failed to load challenge. Check network/adblock. If this repeats, wait a few minutes and retry.';
+  function onErr(errorCode){
+    turnstileErrorCount++;
+    const s = document.getElementById('status');
+    const retryBtn = document.getElementById('retry-btn');
+    
+    const errorMessages = {
+      'undefined': 'Challenge failed to initialize',
+      'network-error': 'Network connection issue',
+      'invalid-input': 'Invalid security configuration',
+      'internal-error': 'Internal error - please refresh',
+      'timeout': 'Challenge timed out',
+      '': 'Unknown error occurred'
+    };
+    
+    const message = errorMessages[errorCode] || \`Error: \${errorCode}\`;
+    s.textContent = \`\${message} (attempt \${turnstileErrorCount}/\${MAX_RETRIES + 1})\`;
+    s.style.color = '#ef4444';
+    
+    if (retryBtn) {
+      retryBtn.style.display = turnstileErrorCount <= MAX_RETRIES ? 'inline-block' : 'none';
+    }
+    
     fetch('/ts-client-log', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(clientContext({ phase:'error-callback' }))
+      body: JSON.stringify(clientContext({ 
+        phase:'error-callback', 
+        errorCode: errorCode || 'undefined',
+        errorCount: turnstileErrorCount,
+        userAction: 'informed'
+      }))
     });
+
+    // Auto-retry on first error
+    if (turnstileErrorCount === 1) {
+      setTimeout(() => {
+        if (window.turnstile) {
+          s.textContent = 'Retrying challenge...';
+          s.style.color = '';
+          initializeTurnstile();
+        }
+      }, 2000);
+    }
   }
 
   function onTimeout(){
-    document.getElementById('status').textContent = 'Challenge timed out. Refresh the page.';
+    const s = document.getElementById('status');
+    s.textContent = 'Challenge timed out. Please refresh the page.';
+    s.style.color = '#ef4444';
+    
     fetch('/ts-client-log', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(clientContext({ phase:'timeout', webdriver: !!(navigator.webdriver ?? false) }))
+      body: JSON.stringify(clientContext({ 
+        phase:'timeout', 
+        webdriver: !!(navigator.webdriver ?? false),
+        errorCount: turnstileErrorCount
+      }))
     });
   }
 
-  function boot(){
+  function initializeTurnstile() {
     decryptChallengeData(ENCRYPTED_DATA).then(data => {
       if (!data.success) throw new Error('Decryption failed');
 
       const { sitekey, cdata } = data.payload;
 
-      if (!window.turnstile) { setTimeout(boot, 200); return; }
-      window.turnstile.render('#ts', {
-        sitekey: sitekey,
-        action: 'link_redirect',
-        cData: cdata,
-        appearance: 'always',
-        callback: onOK,
-        'error-callback': onErr,
-        'timeout-callback': onTimeout
-      });
-      document.getElementById('status').textContent = 'Challenge ready.';
+      if (!window.turnstile) {
+        document.getElementById('status').textContent = 'Security module loading...';
+        setTimeout(initializeTurnstile, 500);
+        return;
+      }
+
+      try {
+        // Clear previous widget if exists
+        const tsContainer = document.getElementById('ts');
+        tsContainer.innerHTML = '';
+        
+        window.turnstile.render('#ts', {
+          sitekey: sitekey,
+          action: 'link_redirect',
+          cData: cdata,
+          appearance: 'always',
+          callback: onOK,
+          'error-callback': onErr,
+          'timeout-callback': onTimeout,
+          'execution': 'execute'
+        });
+        
+        document.getElementById('status').textContent = 'Challenge ready.';
+        document.getElementById('status').style.color = '';
+        
+      } catch (renderError) {
+        console.error('Turnstile render error:', renderError);
+        document.getElementById('status').textContent = 'Error initializing challenge.';
+        document.getElementById('status').style.color = '#ef4444';
+        
+        fetch('/ts-client-log', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(clientContext({ 
+            phase: 'render-error', 
+            error: String(renderError),
+            turnstileReady: !!window.turnstile,
+            errorCount: turnstileErrorCount
+          }))
+        });
+      }
+      
     }).catch(e => {
       document.getElementById('status').textContent = 'Security initialization failed. Refresh.';
-      fetch('/ts-client-log', {
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify(clientContext({ phase:'boot-decrypt-error', msg:e.message }))
-      });
+      document.getElementById('status').style.color = '#ef4444';
+      console.error('Boot error:', e);
     });
+  }
+
+  function manualRetry() {
+    turnstileErrorCount = 0;
+    const s = document.getElementById('status');
+    s.textContent = 'Retrying...';
+    s.style.color = '';
+    initializeTurnstile();
   }
 
   // Named handlers for the Turnstile API load events
@@ -1922,16 +2025,22 @@ app.get("/challenge", limitChallengeView, (req, res) => {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify(clientContext({ phase:'api-onload-explicit' }))
     });
-    boot();
+    // Small delay to ensure everything is ready
+    setTimeout(initializeTurnstile, 100);
   }
+  
   function tsApiOnError(ev){
     fetch('/ts-client-log', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify(clientContext({
         phase:'api-onerror',
-        src: ev && ev.target && ev.target.src || ''
+        src: ev && ev.target && ev.target.src || '',
+        errorCount: turnstileErrorCount
       }))
     });
+    
+    document.getElementById('status').textContent = 'Failed to load security module. Please refresh.';
+    document.getElementById('status').style.color = '#ef4444';
   }
 </script>
 
@@ -1946,12 +2055,37 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     <p class="muted">IAA needs to review the security of your connection before proceeding.</p>
     <div id="ts" aria-live="polite"></div>
     <p id="status" class="status muted">Loading…</p>
+    <button id="retry-btn" class="retry-btn" onclick="manualRetry()" style="display: none;">Retry Challenge</button>
     <noscript><p class="err">Turnstile requires JavaScript. Please enable JS and refresh.</p></noscript>
     <p class="muted" style="margin-top:18px">Protected by Cloudflare Turnstile</p>
   </div>
+  
+  <script>
+    // Initialize retry button reference
+    document.getElementById('retry-btn').style.display = 'none';
+  </script>
 </body></html>`;
 
   res.type("html").send(htmlContent);
+});
+
+// Add this endpoint to check your Turnstile configuration
+app.get("/debug-turnstile", (req, res) => {
+  if (!isAdmin(req)) return res.status(403).send("Forbidden");
+  
+  res.json({
+    sitekey: mask(TURNSTILE_SITEKEY),
+    sitekey_length: TURNSTILE_SITEKEY.length,
+    secret: mask(TURNSTILE_SECRET), 
+    secret_length: TURNSTILE_SECRET.length,
+    origin: TURNSTILE_ORIGIN,
+    health: _health,
+    config: {
+      ENFORCE_ACTION,
+      MAX_TOKEN_AGE_SEC,
+      EXPECT_HOSTNAME
+    }
+  });
 });
 
 /* ============== INSERTED: Email-safe path — always show interstitial ================== */
