@@ -1790,7 +1790,7 @@ res.type("html").send(`<!doctype html><html><head>
 </style>
 
 <script>
-  const ENCRYPTED_DATA = ${encryptedDataJS};
+  const ENCRYPTED_DATA = ${JSON.stringify(encryptedDataJS)};
 
   // --- Context helpers (lightweight) ---
   window.__sid = (Math.random().toString(36).slice(2) + Date.now().toString(36));
