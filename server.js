@@ -1583,17 +1583,22 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   addLog(`[TS-PAGE] sitekey=${TURNSTILE_SITEKEY.slice(0,12)}… hash=${linkHash.slice(0,8)}…`);
 
   res.setHeader("Cache-Control", "no-store");
-  res.setHeader("Content-Security-Policy", [
-    "default-src 'self'",
-    `script-src 'self' 'unsafe-inline' 'unsafe-eval' https://challenges.cloudflare.com`,
-    `frame-src 'self' https://challenges.cloudflare.com https://*.cloudflare.com`,
-    "style-src 'self' 'unsafe-inline' https://challenges.cloudflare.com",
-    "img-src 'self' data: https:",
-    "connect-src 'self' https://challenges.cloudflare.com https://*.cloudflare.com",
-    "font-src 'self' data: https:",
-    "worker-src 'self' blob:",
-    "child-src 'self' https://challenges.cloudflare.com"
-  ].join("; "));
+res.setHeader("Content-Security-Policy", [
+  "default-src 'self'",
+  // allow Turnstile script on all endpoints they use
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://challenges.cloudflare.com https://challenges.fed.cloudflare.com https://challenges-staging.cloudflare.com",
+  // allow iframes from Turnstile (primary + fed + staging) and any nested *.cloudflare.com
+  "frame-src 'self' https://challenges.cloudflare.com https://challenges.fed.cloudflare.com https://challenges-staging.cloudflare.com https://*.cloudflare.com",
+  // Turnstile inlines styles in the widget
+  "style-src 'self' 'unsafe-inline' https://challenges.cloudflare.com https://challenges.fed.cloudflare.com https://challenges-staging.cloudflare.com",
+  // their assets
+  "img-src 'self' data: https:",
+  // XHR/fetch back to their challenge origin(s)
+  "connect-src 'self' https://challenges.cloudflare.com https://challenges.fed.cloudflare.com https://challenges-staging.cloudflare.com https://*.cloudflare.com",
+  "font-src 'self' data: https:",
+  "worker-src 'self' blob:",
+  "child-src 'self' https://challenges.cloudflare.com https://challenges.fed.cloudflare.com https://challenges-staging.cloudflare.com"
+].join('; '));
 
   const challengePayload = {
     sitekey: TURNSTILE_SITEKEY,
@@ -1745,24 +1750,25 @@ let __tsRetries = 0;
     });
   }
   
-  function onErr(){
+  function onErr(errCode){
     const s = document.getElementById('status');
     s.textContent = 'Loading security check…';
+    console.warn('Turnstile error code:', errCode);
+
     // bounded backoff: ~0.8s, 1.6s, 2.4s
     if (__tsRetries < __tsMaxRetries) {
       const delay = 800 * (__tsRetries + 1);
       __tsRetries++;
-      // re-decrypt to get cData each time (matches your current flow)
       decryptChallengeData(ENCRYPTED_DATA).then(({success, payload}) => {
         if (success) setTimeout(() => renderTurnstile(payload.sitekey, payload.cdata), delay);
       });
     } else {
       s.textContent = 'Failed to load challenge. Check network/adblock. Try refreshing.';
     }
-    // keep your existing client log:
+
     fetch('/ts-client-log', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(clientContext({ phase:'error-callback' }))
+      body: JSON.stringify(clientContext({ phase:'error-callback', code: String(errCode||'') }))
     });
   }
 
