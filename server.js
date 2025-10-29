@@ -35,6 +35,41 @@ const app = express();
 const TRUST_PROXY_HOPS = parseInt(process.env.TRUST_PROXY_HOPS || "1", 10);
 app.set("trust proxy", TRUST_PROXY_HOPS);
 
+// --- Global security headers (CSP + PAT) ---
+app.use((req, res, next) => {
+  // avoid caching challenge pages/tokens
+  res.setHeader("Cache-Control", "no-store");
+
+  // Private Access Tokens (for Turnstile); scope it to Turnstile origins instead of wildcard
+  res.setHeader(
+    "Permissions-Policy",
+    'private-token=(self "https://challenges.cloudflare.com" "https://challenges.fed.cloudflare.com" "https://challenges-staging.cloudflare.com")'
+  );
+
+  // Content Security Policy tailored for Turnstile
+  res.setHeader("Content-Security-Policy", [
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://challenges.cloudflare.com https://challenges.fed.cloudflare.com https://challenges-staging.cloudflare.com",
+    "frame-src 'self' https://challenges.cloudflare.com https://challenges.fed.cloudflare.com https://challenges-staging.cloudflare.com https://*.cloudflare.com",
+    "style-src 'self' 'unsafe-inline' https://challenges.cloudflare.com https://challenges.fed.cloudflare.com https://challenges-staging.cloudflare.com",
+    "img-src 'self' data: https:",
+    "connect-src 'self' https://challenges.cloudflare.com https://challenges.fed.cloudflare.com https://challenges-staging.cloudflare.com https://*.cloudflare.com",
+    "font-src 'self' data: https:",
+    "worker-src 'self' blob:",
+    // hardening
+    "object-src 'none'",
+    "base-uri 'none'",
+    "form-action 'self'",
+    "frame-ancestors 'self'"
+  ].join('; '));
+
+  // (optional but nice-to-have) extra headers
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+
+  next();
+});
+
 // ================== HELPER FUNCTIONS ==================
 function mask(s){ if (!s) return ""; return s.length<=6 ? "*".repeat(s.length) : s.slice(0,4)+"…"+s.slice(-2); }
 
@@ -1582,35 +1617,6 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   addLog(`[CHALLENGE] secured next='${nextEnc.slice(0,20)}…' cdata=${cdata.slice(0,16)}…`);
   addLog(`[TS-PAGE] sitekey=${TURNSTILE_SITEKEY.slice(0,12)}… hash=${linkHash.slice(0,8)}…`);
 
-app.use((req, res, next) => {
-  res.setHeader("Cache-Control", "no-store");
-  
-  // Tighter (recommended):
-  res.setHeader(
-    "Permissions-Policy",
-    'private-token=(self "https://challenges.cloudflare.com" "https://challenges.fed.cloudflare.com" "https://challenges-staging.cloudflare.com")'
-  );
-
-  res.setHeader("Content-Security-Policy", [
-    "default-src 'self'",
-    "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://challenges.cloudflare.com https://challenges.fed.cloudflare.com https://challenges-staging.cloudflare.com",
-    "frame-src 'self' https://challenges.cloudflare.com https://challenges.fed.cloudflare.com https://challenges-staging.cloudflare.com https://*.cloudflare.com",
-    "style-src 'self' 'unsafe-inline' https://challenges.cloudflare.com https://challenges.fed.cloudflare.com https://challenges-staging.cloudflare.com",
-    "img-src 'self' data: https:",
-    "connect-src 'self' https://challenges.cloudflare.com https://challenges.fed.cloudflare.com https://challenges-staging.cloudflare.com https://*.cloudflare.com",
-    "font-src 'self' data: https:",
-    "worker-src 'self' blob:",
-    
-    // hardening
-    "object-src 'none'",
-    "base-uri 'none'",
-    "form-action 'self'",
-    "frame-ancestors 'self'"
-  ].join('; '));
-
-  next();
-});
-  
   const challengePayload = {
     sitekey: TURNSTILE_SITEKEY,
     cdata: cdata,
