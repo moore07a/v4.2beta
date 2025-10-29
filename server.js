@@ -1583,21 +1583,28 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   addLog(`[TS-PAGE] sitekey=${TURNSTILE_SITEKEY.slice(0,12)}… hash=${linkHash.slice(0,8)}…`);
 
   res.setHeader("Cache-Control", "no-store");
+
+// allow Private Access Tokens for Turnstile
+res.setHeader("Permissions-Policy", "private-token=*");
+
+// full CSP as a single string
 res.setHeader("Content-Security-Policy", [
   "default-src 'self'",
-  // allow Turnstile script on all endpoints they use
   "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://challenges.cloudflare.com https://challenges.fed.cloudflare.com https://challenges-staging.cloudflare.com",
-  // allow iframes from Turnstile (primary + fed + staging) and any nested *.cloudflare.com
   "frame-src 'self' https://challenges.cloudflare.com https://challenges.fed.cloudflare.com https://challenges-staging.cloudflare.com https://*.cloudflare.com",
-  // Turnstile inlines styles in the widget
   "style-src 'self' 'unsafe-inline' https://challenges.cloudflare.com https://challenges.fed.cloudflare.com https://challenges-staging.cloudflare.com",
-  // their assets
   "img-src 'self' data: https:",
-  // XHR/fetch back to their challenge origin(s)
   "connect-src 'self' https://challenges.cloudflare.com https://challenges.fed.cloudflare.com https://challenges-staging.cloudflare.com https://*.cloudflare.com",
   "font-src 'self' data: https:",
   "worker-src 'self' blob:",
-  "child-src 'self' https://challenges.cloudflare.com https://challenges.fed.cloudflare.com https://challenges-staging.cloudflare.com"
+  // legacy; harmless if you keep it, but frame-src already covers iframes
+  "child-src 'self' https://challenges.cloudflare.com https://challenges.fed.cloudflare.com https://challenges-staging.cloudflare.com",
+
+  // optional hardening
+  "object-src 'none'",
+  "base-uri 'none'",
+  "form-action 'self'",
+  "frame-ancestors 'self'"
 ].join('; '));
 
   const challengePayload = {
