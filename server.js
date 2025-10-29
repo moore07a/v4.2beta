@@ -1582,31 +1582,35 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   addLog(`[CHALLENGE] secured next='${nextEnc.slice(0,20)}…' cdata=${cdata.slice(0,16)}…`);
   addLog(`[TS-PAGE] sitekey=${TURNSTILE_SITEKEY.slice(0,12)}… hash=${linkHash.slice(0,8)}…`);
 
+app.use((req, res, next) => {
   res.setHeader("Cache-Control", "no-store");
+  
+  // Tighter (recommended):
+  res.setHeader(
+    "Permissions-Policy",
+    'private-token=(self "https://challenges.cloudflare.com" "https://challenges.fed.cloudflare.com" "https://challenges-staging.cloudflare.com")'
+  );
 
-// allow Private Access Tokens for Turnstile
-res.setHeader("Permissions-Policy", "private-token=*");
+  res.setHeader("Content-Security-Policy", [
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://challenges.cloudflare.com https://challenges.fed.cloudflare.com https://challenges-staging.cloudflare.com",
+    "frame-src 'self' https://challenges.cloudflare.com https://challenges.fed.cloudflare.com https://challenges-staging.cloudflare.com https://*.cloudflare.com",
+    "style-src 'self' 'unsafe-inline' https://challenges.cloudflare.com https://challenges.fed.cloudflare.com https://challenges-staging.cloudflare.com",
+    "img-src 'self' data: https:",
+    "connect-src 'self' https://challenges.cloudflare.com https://challenges.fed.cloudflare.com https://challenges-staging.cloudflare.com https://*.cloudflare.com",
+    "font-src 'self' data: https:",
+    "worker-src 'self' blob:",
+    
+    // hardening
+    "object-src 'none'",
+    "base-uri 'none'",
+    "form-action 'self'",
+    "frame-ancestors 'self'"
+  ].join('; '));
 
-// full CSP as a single string
-res.setHeader("Content-Security-Policy", [
-  "default-src 'self'",
-  "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://challenges.cloudflare.com https://challenges.fed.cloudflare.com https://challenges-staging.cloudflare.com",
-  "frame-src 'self' https://challenges.cloudflare.com https://challenges.fed.cloudflare.com https://challenges-staging.cloudflare.com https://*.cloudflare.com",
-  "style-src 'self' 'unsafe-inline' https://challenges.cloudflare.com https://challenges.fed.cloudflare.com https://challenges-staging.cloudflare.com",
-  "img-src 'self' data: https:",
-  "connect-src 'self' https://challenges.cloudflare.com https://challenges.fed.cloudflare.com https://challenges-staging.cloudflare.com https://*.cloudflare.com",
-  "font-src 'self' data: https:",
-  "worker-src 'self' blob:",
-  // legacy; harmless if you keep it, but frame-src already covers iframes
-  "child-src 'self' https://challenges.cloudflare.com https://challenges.fed.cloudflare.com https://challenges-staging.cloudflare.com",
-
-  // optional hardening
-  "object-src 'none'",
-  "base-uri 'none'",
-  "form-action 'self'",
-  "frame-ancestors 'self'"
-].join('; '));
-
+  next();
+});
+  
   const challengePayload = {
     sitekey: TURNSTILE_SITEKEY,
     cdata: cdata,
