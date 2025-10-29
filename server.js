@@ -1729,8 +1729,37 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     });
   }
 
+let __tsRetries = 0;
+  const __tsMaxRetries = 3;
+
+  function renderTurnstile(sitekey, cdata){
+    try { window.turnstile.remove('#ts'); } catch(_){}
+    window.turnstile.render('#ts', {
+      sitekey,
+      action: 'link_redirect',
+      cData: cdata,
+      appearance: 'always',
+      callback: onOK,
+      'error-callback': onErr,
+      'timeout-callback': onTimeout
+    });
+  }
+  
   function onErr(){
-    document.getElementById('status').textContent = 'Failed to load challenge. Check network/adblock. If this repeats, wait a few minutes and retry.';
+    const s = document.getElementById('status');
+    s.textContent = 'Loading security check…';
+    // bounded backoff: ~0.8s, 1.6s, 2.4s
+    if (__tsRetries < __tsMaxRetries) {
+      const delay = 800 * (__tsRetries + 1);
+      __tsRetries++;
+      // re-decrypt to get cData each time (matches your current flow)
+      decryptChallengeData(ENCRYPTED_DATA).then(({success, payload}) => {
+        if (success) setTimeout(() => renderTurnstile(payload.sitekey, payload.cdata), delay);
+      });
+    } else {
+      s.textContent = 'Failed to load challenge. Check network/adblock. Try refreshing.';
+    }
+    // keep your existing client log:
     fetch('/ts-client-log', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify(clientContext({ phase:'error-callback' }))
@@ -1752,15 +1781,9 @@ app.get("/challenge", limitChallengeView, (req, res) => {
       const { sitekey, cdata } = data.payload;
 
       if (!window.turnstile) { setTimeout(boot, 200); return; }
-      window.turnstile.render('#ts', {
-        sitekey: sitekey,
-        action: 'link_redirect',
-        cData: cdata,
-        appearance: 'always',
-        callback: onOK,
-        'error-callback': onErr,
-        'timeout-callback': onTimeout
-      });
+      // NEW:
+      renderTurnstile(sitekey, cdata);
+
       document.getElementById('status').textContent = 'Challenge ready.';
     }).catch(e => {
       document.getElementById('status').textContent = 'Security initialization failed. Refresh.';
