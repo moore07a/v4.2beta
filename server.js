@@ -835,6 +835,25 @@ const SCANNER_PATTERNS = {
   ],
 };
 
+// --- Back-compat adapter: make SCANNER_PATTERNS iterable for older code ---
+const SCANNER_PATTERNS_LIST = Array.isArray(SCANNER_PATTERNS) ? SCANNER_PATTERNS : [
+  // turn each UA regex into an entry
+  ...((SCANNER_PATTERNS.uaRegexes || []).map(re => ({
+    pattern: re,
+    name: 'UA regex',
+    confidence: 0.9,
+    type: 'generic'
+  }))),
+
+  // turn each UA substring into a case-insensitive regex entry
+  ...((SCANNER_PATTERNS.uaSubstrings || []).map(sub => ({
+    pattern: new RegExp(sub.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'),
+    name: 'UA substring',
+    confidence: 0.6,
+    type: 'generic'
+  }))),
+];
+
 const EXTERNAL_SCANNER_CONFIG = process.env.SCANNER_CONFIG_URL || null;
 let dynamicScanners = [];
 
@@ -855,7 +874,7 @@ function detectScannerEnhanced(req) {
   const ip = getClientIp(req);
   
   let detected = [];
-  const allPatterns = [...SCANNER_PATTERNS, ...dynamicScanners];
+  const allPatterns = [...SCANNER_PATTERNS_LIST, ...dynamicScanners];
   
   for (const scanner of allPatterns) {
     if (scanner.pattern.test(ua)) {
