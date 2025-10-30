@@ -2088,9 +2088,6 @@ app.listen(PORT, async () => {
   
   await loadScannerPatterns();
 
-  // Add the health config log here, after all constants are defined
-  addLog(`ℹ️ Health check config: interval=${fmtDurMH(HEALTH_INTERVAL_MS)} heartbeat=${fmtDurMH(HEALTH_HEARTBEAT_MS)}`);
-
   checkTurnstileReachable();
   setInterval(checkTurnstileReachable, HEALTH_INTERVAL_MS);
 
