@@ -32,8 +32,16 @@ const EMAIL_DISPLAY_MAX_LENGTH = 80;
 const URL_DISPLAY_MAX_LENGTH = 120;
 
 const app = express();
-const TRUST_PROXY_HOPS = parseInt(process.env.TRUST_PROXY_HOPS || "1", 10);
-app.set("trust proxy", TRUST_PROXY_HOPS);
+const raw = process.env.TRUST_PROXY_HOPS && process.env.TRUST_PROXY_HOPS.trim();
+
+const trustProxy =
+  raw === undefined || raw === '' ? true
+: raw.toLowerCase && raw.toLowerCase() === 'true'  ? true
+: raw.toLowerCase && raw.toLowerCase() === 'false' ? false
+: Number.isFinite(+raw) && +raw >= 0 ? +raw
+: true;
+
+app.set('trust proxy', trustProxy);
 
 // --- Global security headers (CSP + PAT) ---
 app.use((req, res, next) => {
@@ -1407,6 +1415,20 @@ app.use("/stream-log", (req, res, next) => {
   if (isAdminSSE(req)) return next();
   return limitSseUnauth(req, res, next);
 });
+
+// ✅ Put the debug route here (before your normal routes)
+if (process.env.IP_DEBUG === '1') {
+  app.get('/_debug/ip', (req, res) => {
+    res.json({
+      trustProxy: req.app.get('trust proxy'),
+      reqIp: req.ip,
+      reqIps: req.ips,
+      xff: req.headers['x-forwarded-for'] || null,
+      xReal: req.headers['x-real-ip'] || null,
+      nf: req.headers['x-nf-client-connection-ip'] || null
+    });
+  });
+}
 
 // ================== ROUTES ==================
 app.post("/decrypt-challenge-data", 
