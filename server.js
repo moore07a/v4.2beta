@@ -1916,7 +1916,18 @@ let __tsRetries = 0;
 
     fetch('/ts-client-log', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(clientContext({ phase:'error-callback', code: String(errCode||'') }))
+      body: JSON.stringify(clientContext({
+  phase: 'error-callback',
+  sid: window.__sid,                 // <-- make sure you send a stable session id
+  code: String(errCode || ''),
+  webdriver: !!(navigator.webdriver ?? false),
+  hw: navigator.hardwareConcurrency ?? null,
+  mem: navigator.deviceMemory ?? null,
+  plat: navigator.platform ?? null,
+  lang: navigator.language ?? null,
+  tzOff: new Date().getTimezoneOffset(),
+  scr: { w: screen?.width ?? null, h: screen?.height ?? null, dpr: devicePixelRatio ?? null }
+}))
     });
   }
 
