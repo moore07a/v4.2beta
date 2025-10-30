@@ -1962,7 +1962,19 @@ let __tsRetries = 0;
   function tsApiOnLoad(ev){
     fetch('/ts-client-log', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(clientContext({ phase:'api-onload-explicit' }))
+      body: JSON.stringify(clientContext({
+  phase: 'api-onload-explicit',
+  sid: window.__sid,                           // stable session id
+  webdriver: !!(navigator.webdriver ?? false),
+  hw: navigator.hardwareConcurrency ?? null,
+  mem: navigator.deviceMemory ?? null,
+  plat: navigator.platform ?? null,
+  lang: navigator.language ?? null,            // keep your existing tz too
+  tzOff: new Date().getTimezoneOffset(),       // minutes offset
+  scr: { w: screen?.width ?? null,
+         h: screen?.height ?? null,
+         dpr: window.devicePixelRatio ?? null }
+}))
     });
     boot();
   }
