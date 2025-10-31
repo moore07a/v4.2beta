@@ -718,38 +718,75 @@ function decryptChallengeData(encryptedData) {
 }
 
 // ================== CLIENT IP & GEO FUNCTIONS ==================
+
+// Proper IP address parser that handles IPv4, IPv6, and ports correctly
+function parseIpAddress(ip) {
+  if (!ip || typeof ip !== 'string') return ip;
+  
+  // Remove any surrounding whitespace
+  ip = ip.trim();
+  
+  // Handle IPv6 with port format: [2001:db8::1]:8080
+  if (ip.startsWith('[') && ip.includes(']')) {
+    const endBracket = ip.indexOf(']');
+    return ip.slice(1, endBracket);
+  }
+  
+  // Handle IPv4 with port: 192.168.1.1:8080
+  if (ip.includes('.') && ip.includes(':')) {
+    const lastColon = ip.lastIndexOf(':');
+    // Verify it's actually a port by checking if the part after colon is numeric
+    const potentialPort = ip.slice(lastColon + 1);
+    if (/^\d+$/.test(potentialPort)) {
+      return ip.slice(0, lastColon);
+    }
+  }
+  
+  // Handle IPv6 with port without brackets (uncommon but possible)
+  if (ip.includes(':') && ip.split(':').length > 2) {
+    const lastColon = ip.lastIndexOf(':');
+    const potentialPort = ip.slice(lastColon + 1);
+    if (/^\d+$/.test(potentialPort)) {
+      return ip.slice(0, lastColon);
+    }
+  }
+  
+  // Plain IPv4, IPv6 without port, or unknown format
+  return ip;
+}
+
 function getClientIp(req) {
   // Platform-specific headers in order of preference
   if (req.headers['x-vercel-forwarded-for']) {
     const ips = String(req.headers['x-vercel-forwarded-for']).split(',').map(ip => ip.trim());
     const clientIp = ips[0];
     if (clientIp && clientIp !== '') {
-      return clientIp.split(':')[0];
+      return parseIpAddress(clientIp);
     }
   }
   
   // Netlify
   if (req.headers['x-nf-client-connection-ip']) {
     const ip = String(req.headers['x-nf-client-connection-ip']).trim();
-    if (ip && ip !== '') return ip.split(':')[0];
+    if (ip && ip !== '') return parseIpAddress(ip);
   }
   
   // Cloudflare
   if (req.headers['cf-connecting-ip']) {
     const ip = String(req.headers['cf-connecting-ip']).trim();
-    if (ip && ip !== '') return ip.split(':')[0];
+    if (ip && ip !== '') return parseIpAddress(ip);
   }
   
   // Render.com
   if (req.headers['x-render-ip']) {
     const ip = String(req.headers['x-render-ip']).trim();
-    if (ip && ip !== '') return ip.split(':')[0];
+    if (ip && ip !== '') return parseIpAddress(ip);
   }
   
   // Railway
   if (req.headers['x-railway-ip']) {
     const ip = String(req.headers['x-railway-ip']).trim();
-    if (ip && ip !== '') return ip.split(':')[0];
+    if (ip && ip !== '') return parseIpAddress(ip);
   }
   
   // Heroku, AWS ELB, Google Cloud, Azure, and most other platforms
@@ -758,12 +795,12 @@ function getClientIp(req) {
     // Get the first IP that's not a known proxy IP
     for (const ip of ips) {
       if (ip && ip !== '' && !isKnownProxyIp(ip)) {
-        return ip.split(':')[0];
+        return parseIpAddress(ip);
       }
     }
     // Fallback to first IP if all are proxy IPs
     if (ips[0] && ips[0] !== '') {
-      return ips[0].split(':')[0];
+      return parseIpAddress(ips[0]);
     }
   }
   
@@ -790,13 +827,13 @@ function getClientIp(req) {
       }
       
       if (ip && ip !== '') {
-        return ip.split(':')[0];
+        return parseIpAddress(ip);
       }
     }
   }
   
   // Final fallback to Express
-  return req.ip || "";
+  return parseIpAddress(req.ip || "");
 }
 
 // Helper function to identify known proxy IPs
@@ -1918,18 +1955,23 @@ app.post("/admin/unban", (req, res) => {
 });
 
 app.post("/admin/strike-reset", (req, res) => {
-  if (!isAdmin(req)) return res.status(403).send("Forbidden");
-  const ip = String(req.query.ip||"").trim();
-  if (!ip) return res.status(400).send("ip required");
-  
-  // Validate IP format
-  if (!isValidIpAddress(ip)) {
-    return res.status(400).json({error: "Invalid IP address format"});
+  try {
+    if (!isAdmin(req)) return res.status(403).send("Forbidden");
+    const ip = String(req.query.ip||"").trim();
+    if (!ip) return res.status(400).send("ip required");
+    
+    // Validate IP format
+    if (!isValidIpAddress(ip)) {
+      return res.status(400).json({error: "Invalid IP address format"});
+    }
+    
+    const safeIp = sanitizeIpForKey(ip);
+    inMemStrikes.delete(safeIp);
+    return res.json({ok:true, message:"strikes reset", ip});
+  } catch (error) {
+    addLog(`[ADMIN-ERROR] strike-reset: ${error.message}`);
+    return res.status(500).json({error: "Internal server error"});
   }
-  
-  const safeIp = sanitizeIpForKey(ip);
-  inMemStrikes.delete(safeIp);
-  return res.json({ok:true, message:"strikes reset", ip});
 });
 
 app.get(
