@@ -693,100 +693,158 @@ function decryptChallengeData(encryptedData) {
 
 // ================== CLIENT IP & GEO FUNCTIONS ==================
 function getClientIp(req) {
-  // Try all possible headers in order of reliability
-  const headers = [
-    "cf-connecting-ip",           // Cloudflare
-    "x-real-ip",                 // Nginx
-    "x-vercel-forwarded-for",    // Vercel
-    "x-forwarded-for",           // Standard proxy header
-    "x-netlify-ip",              // Netlify
-    "x-nf-client-connection-ip", // Netlify alternative
-    "true-client-ip",            // Akamai, Cloudflare
-    "x-client-ip",               // Custom
-    "x-cluster-client-ip",       // Rackspace LB, Riverbed Stingray
-    "forwarded",                 // Standard Forwarded header
+  // Platform-specific headers in order of preference
+  if (req.headers['x-vercel-forwarded-for']) {
+    const ips = String(req.headers['x-vercel-forwarded-for']).split(',').map(ip => ip.trim());
+    const clientIp = ips[0];
+    if (clientIp && clientIp !== '') {
+      return clientIp.split(':')[0];
+    }
+  }
+  
+  // Netlify
+  if (req.headers['x-nf-client-connection-ip']) {
+    const ip = String(req.headers['x-nf-client-connection-ip']).trim();
+    if (ip && ip !== '') return ip.split(':')[0];
+  }
+  
+  // Cloudflare
+  if (req.headers['cf-connecting-ip']) {
+    const ip = String(req.headers['cf-connecting-ip']).trim();
+    if (ip && ip !== '') return ip.split(':')[0];
+  }
+  
+  // Render.com
+  if (req.headers['x-render-ip']) {
+    const ip = String(req.headers['x-render-ip']).trim();
+    if (ip && ip !== '') return ip.split(':')[0];
+  }
+  
+  // Railway
+  if (req.headers['x-railway-ip']) {
+    const ip = String(req.headers['x-railway-ip']).trim();
+    if (ip && ip !== '') return ip.split(':')[0];
+  }
+  
+  // Heroku, AWS ELB, Google Cloud, Azure, and most other platforms
+  if (req.headers['x-forwarded-for']) {
+    const ips = String(req.headers['x-forwarded-for']).split(',').map(ip => ip.trim());
+    // Get the first IP that's not a known proxy IP
+    for (const ip of ips) {
+      if (ip && ip !== '' && !isKnownProxyIp(ip)) {
+        return ip.split(':')[0];
+      }
+    }
+    // Fallback to first IP if all are proxy IPs
+    if (ips[0] && ips[0] !== '') {
+      return ips[0].split(':')[0];
+    }
+  }
+  
+  // Standard headers
+  const standardHeaders = [
+    "x-real-ip",
+    "true-client-ip",
+    "x-client-ip",
+    "x-cluster-client-ip",
+    "forwarded"
   ];
   
-  for (const header of headers) {
+  for (const header of standardHeaders) {
     const value = req.headers[header];
     if (value) {
-      // Handle comma-separated lists (x-forwarded-for, x-vercel-forwarded-for)
-      if (header === "x-forwarded-for" || header === "x-vercel-forwarded-for") {
-        const ips = String(value).split(',').map(ip => ip.trim());
-        // Return the first IP (original client) that's not empty
-        const clientIp = ips.find(ip => ip && ip !== '');
-        if (clientIp) {
-          // Remove port if present (e.g., "192.168.1.1:12345")
-          return clientIp.split(':')[0];
-        }
-      }
-      // Handle Forwarded header (standard format)
-      else if (header === "forwarded") {
-        const forwarded = String(value);
-        // Parse: Forwarded: for=192.0.2.60;proto=http;by=203.0.113.43
-        const forMatch = forwarded.match(/for=([^,;]+)/i);
+      let ip = String(value).trim();
+      
+      // Handle Forwarded header (RFC 7239)
+      if (header === "forwarded") {
+        const forMatch = ip.match(/for=([^,;]+)/i);
         if (forMatch) {
-          const ip = forMatch[1].trim();
-          // Remove quotes and port if present
-          return ip.replace(/^\[?"?'?|"?'?\]?$/g, '').split(':')[0];
+          ip = forMatch[1].replace(/^\[?"?'?|"?'?\]?$/g, '').trim();
         }
       }
-      // For single IP headers, return as-is
-      else {
-        const ip = String(value).trim();
-        // Remove port if present
+      
+      if (ip && ip !== '') {
         return ip.split(':')[0];
       }
     }
   }
   
-  // Fallback to Express's req.ip (respects trust proxy setting)
-  if (req.ip) {
-    const ip = String(req.ip).trim();
-    return ip.split(':')[0]; // Remove IPv6 prefix if present
-  }
+  // Final fallback to Express
+  return req.ip || "";
+}
+
+// Helper function to identify known proxy IPs
+function isKnownProxyIp(ip) {
+  const proxyRanges = [
+    /^3\.\d+\.\d+\.\d+$/,  // Vercel AWS IPs
+    /^54\.\d+\.\d+\.\d+$/, // AWS us-east-1
+    /^52\.\d+\.\d+\.\d+$/, // AWS us-east-1
+    /^34\.\d+\.\d+\.\d+$/, // Google Cloud
+    /^35\.\d+\.\d+\.\d+$/, // Google Cloud
+    /^13\.\d+\.\d+\.\d+$/, // AWS
+    /^10\.\d+\.\d+\.\d+$/, // Private
+    /^192\.168\.\d+\.\d+$/, // Private
+    /^172\.(1[6-9]|2[0-9]|3[0-1])\.\d+\.\d+$/, // Private
+    /^127\.\d+\.\d+\.\d+$/, // Localhost
+    /^::1$/, // IPv6 localhost
+    /^fc00::\/7$/, // IPv6 private
+  ];
   
-  return "";
+  return proxyRanges.some(pattern => pattern.test(ip));
 }
 
 function getCountry(req) {
   const h = req.headers;
   
-  // Try platform-specific headers first
-  const nf = h["x-nf-geo"]; 
-  if (nf) { 
+  // Platform-specific country headers
+  const countryHeaders = [
+    ["x-vercel-ip-country", "vercel"],
+    ["cf-ipcountry", "cloudflare"], 
+    ["cf-edge-country", "cloudflare"],
+    ["x-nf-country", "netlify"],
+    ["x-render-country", "render"],
+    ["x-railway-country", "railway"],
+  ];
+  
+  for (const [header, platform] of countryHeaders) {
+    const value = h[header];
+    if (value) {
+      return String(value).toUpperCase();
+    }
+  }
+  
+  // Netlify geo JSON
+  if (h["x-nf-geo"]) { 
     try { 
-      const o = JSON.parse(nf); 
-      if (o.country) return String(o.country).toUpperCase(); 
+      const geo = JSON.parse(h["x-nf-geo"]);
+      if (geo.country) return String(geo.country).toUpperCase();
     } catch {} 
   }
   
-  const cf = h["cf-ipcountry"] || h["cf-edge-country"]; 
-  if (cf) return String(cf).toUpperCase();
-  
-  const vercel = h["x-vercel-ip-country"]; 
-  if (vercel) return String(vercel).toUpperCase();
-  
-  const fly = h["fly-client-ip"]; // Fly.io
-  if (fly) {
-    // Fly.io includes country in some headers
-    const region = h["fly-region"]; // Sometimes contains country info
-    if (region && region.length === 3) return region.toUpperCase();
+  // Fly.io region (sometimes contains country)
+  if (h["fly-region"]) {
+    const region = String(h["fly-region"]).toLowerCase();
+    // Extract country from region codes like "iad" (US), "lhr" (UK), etc.
+    const regionToCountry = {
+      'iad': 'US', 'atl': 'US', 'dfw': 'US', 'den': 'US', 'lax': 'US', 'mia': 'US',
+      'ord': 'US', 'phx': 'US', 'qro': 'MX', 'scl': 'CL', 'bog': 'CO', 'eze': 'AR',
+      'gru': 'BR', 'lhr': 'GB', 'cdg': 'FR', 'ams': 'NL', 'fra': 'DE', 'mad': 'ES',
+      'waw': 'PL', 'arn': 'SE', 'nrt': 'JP', 'hkg': 'HK', 'sin': 'SG', 'bom': 'IN',
+      'syd': 'AU', 'mel': 'AU'
+    };
+    if (regionToCountry[region]) {
+      return regionToCountry[region];
+    }
   }
   
-  const railway = h["x-railway-region"]; // Railway
-  if (railway) {
-    // Extract country code if present (e.g., "us-east-1" -> "US")
-    const match = railway.match(/^([a-z]{2})-/i);
-    if (match) return match[1].toUpperCase();
-  }
-  
-  // Fallback to geoip lookup
+  // Fallback to geoip with real client IP
   if (geoip) {
     const ip = getClientIp(req);
-    if (ip && ip !== "127.0.0.1" && ip !== "::1" && !ip.startsWith("10.") && !ip.startsWith("192.168.")) {
-      const look = geoip.lookup(ip);
-      if (look && look.country) return String(look.country).toUpperCase();
+    if (ip && !isKnownProxyIp(ip)) {
+      const lookup = geoip.lookup(ip);
+      if (lookup && lookup.country) {
+        return String(lookup.country).toUpperCase();
+      }
     }
   }
   
@@ -794,8 +852,21 @@ function getCountry(req) {
 }
 
 function getASN(req) { 
-  const asn = req.headers["cf-asn"] || req.headers["x-asn"] || req.headers["x-vercel-ip-asn"];
-  return asn ? String(asn).toUpperCase() : null; 
+  const asnHeaders = [
+    "cf-asn",
+    "x-asn", 
+    "x-vercel-ip-asn",
+    "x-nf-asn",
+    "x-render-asn"
+  ];
+  
+  for (const header of asnHeaders) {
+    const value = req.headers[header];
+    if (value) {
+      return String(value).toUpperCase();
+    }
+  }
+  return null;
 }
 
 // ================== SECURITY POLICY FUNCTIONS ==================
@@ -1509,13 +1580,22 @@ app.use("/stream-log", (req, res, next) => {
 // ✅ Put the debug route here (before your normal routes)
 if (process.env.IP_DEBUG === '1') {
   app.get('/_debug/ip', (req, res) => {
+    const clientIp = getClientIp(req); // Use the same function!
     res.json({
       trustProxy: req.app.get('trust proxy'),
+      clientIp: clientIp,
       reqIp: req.ip,
       reqIps: req.ips,
       xff: req.headers['x-forwarded-for'] || null,
+      xVercelForwarded: req.headers['x-vercel-forwarded-for'] || null,
       xReal: req.headers['x-real-ip'] || null,
-      nf: req.headers['x-nf-client-connection-ip'] || null
+      nf: req.headers['x-nf-client-connection-ip'] || null,
+      allHeaders: {
+        'x-forwarded-for': req.headers['x-forwarded-for'],
+        'x-vercel-forwarded-for': req.headers['x-vercel-forwarded-for'],
+        'x-real-ip': req.headers['x-real-ip'],
+        'x-vercel-ip': req.headers['x-vercel-ip']
+      }
     });
   });
 }
