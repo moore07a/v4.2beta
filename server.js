@@ -150,6 +150,16 @@ function safeLogValue(value, maxLength = 100) {
     .substring(0, maxLength);
 }
 
+// Enhanced JSON logging with proper length handling
+function safeLogJson(payload, maxLength = 500) {
+  try {
+    const jsonString = JSON.stringify(payload);
+    return safeLogValue(jsonString, maxLength);
+  } catch (e) {
+    return safeLogValue(`[JSON-Error: ${e.message}] ${String(payload)}`, maxLength);
+  }
+}
+
 // Enhanced sanitizeOneLine with additional protection
 function sanitizeOneLine(s) {
   return safeLogValue(s, SANITIZATION_MAX_LENGTH);
@@ -1723,7 +1733,7 @@ app.post(
       return res.status(204).end();
     }
 
-    addLog(`[TS-CLIENT:${safeLogValue(payload.phase)}] ip=${safeLogValue(ip)} ua="${safeLogValue(ua)}" ${safeLogValue(JSON.stringify(payload))}`);
+    addLog(`[TS-CLIENT:${safeLogValue(payload.phase)}] ip=${safeLogValue(ip)} ua="${safeLogValue(ua)}" ${safeLogJson(payload)}`);
     addSpacer();
     res.status(204).end();
   }
