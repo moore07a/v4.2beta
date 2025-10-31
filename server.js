@@ -32,16 +32,25 @@ const EMAIL_DISPLAY_MAX_LENGTH = 80;
 const URL_DISPLAY_MAX_LENGTH = 120;
 
 const app = express();
-const raw = process.env.TRUST_PROXY_HOPS && process.env.TRUST_PROXY_HOPS.trim();
-
-const trustProxy =
-  raw === undefined || raw === '' ? true
-: raw.toLowerCase && raw.toLowerCase() === 'true'  ? true
-: raw.toLowerCase && raw.toLowerCase() === 'false' ? false
-: Number.isFinite(+raw) && +raw >= 0 ? +raw
-: true;
+// More explicit proxy trust configuration
+const trustProxy = (() => {
+  const raw = process.env.TRUST_PROXY_HOPS && process.env.TRUST_PROXY_HOPS.trim();
+  
+  if (raw === undefined || raw === '') return true; // Default: trust all
+  if (raw.toLowerCase() === 'true') return true;
+  if (raw.toLowerCase() === 'false') return false;
+  if (Number.isFinite(+raw) && +raw >= 0) return +raw;
+  
+  // For platform-specific settings
+  if (process.env.VERCEL) return 1;
+  if (process.env.NETLIFY) return 1;
+  if (process.env.RENDER) return 1;
+  
+  return true; // Fallback to trusting all
+})();
 
 app.set('trust proxy', trustProxy);
+console.log(`[PROXY] Trust proxy setting: ${trustProxy}`);
 
 // --- Global security headers (CSP + PAT) ---
 app.use((req, res, next) => {
@@ -684,29 +693,110 @@ function decryptChallengeData(encryptedData) {
 
 // ================== CLIENT IP & GEO FUNCTIONS ==================
 function getClientIp(req) {
-  return (
-    req.headers["cf-connecting-ip"] ||
-    req.headers["x-nf-client-connection-ip"] ||
-    req.headers["x-real-ip"] ||
-    req.ip ||
-    ""
-  );
+  // Try all possible headers in order of reliability
+  const headers = [
+    "cf-connecting-ip",           // Cloudflare
+    "x-real-ip",                 // Nginx
+    "x-vercel-forwarded-for",    // Vercel
+    "x-forwarded-for",           // Standard proxy header
+    "x-netlify-ip",              // Netlify
+    "x-nf-client-connection-ip", // Netlify alternative
+    "true-client-ip",            // Akamai, Cloudflare
+    "x-client-ip",               // Custom
+    "x-cluster-client-ip",       // Rackspace LB, Riverbed Stingray
+    "forwarded",                 // Standard Forwarded header
+  ];
+  
+  for (const header of headers) {
+    const value = req.headers[header];
+    if (value) {
+      // Handle comma-separated lists (x-forwarded-for, x-vercel-forwarded-for)
+      if (header === "x-forwarded-for" || header === "x-vercel-forwarded-for") {
+        const ips = String(value).split(',').map(ip => ip.trim());
+        // Return the first IP (original client) that's not empty
+        const clientIp = ips.find(ip => ip && ip !== '');
+        if (clientIp) {
+          // Remove port if present (e.g., "192.168.1.1:12345")
+          return clientIp.split(':')[0];
+        }
+      }
+      // Handle Forwarded header (standard format)
+      else if (header === "forwarded") {
+        const forwarded = String(value);
+        // Parse: Forwarded: for=192.0.2.60;proto=http;by=203.0.113.43
+        const forMatch = forwarded.match(/for=([^,;]+)/i);
+        if (forMatch) {
+          const ip = forMatch[1].trim();
+          // Remove quotes and port if present
+          return ip.replace(/^\[?"?'?|"?'?\]?$/g, '').split(':')[0];
+        }
+      }
+      // For single IP headers, return as-is
+      else {
+        const ip = String(value).trim();
+        // Remove port if present
+        return ip.split(':')[0];
+      }
+    }
+  }
+  
+  // Fallback to Express's req.ip (respects trust proxy setting)
+  if (req.ip) {
+    const ip = String(req.ip).trim();
+    return ip.split(':')[0]; // Remove IPv6 prefix if present
+  }
+  
+  return "";
 }
 
-function getCountry(req){
-  const h=req.headers;
-  const nf=h["x-nf-geo"]; if (nf){ try{ const o=JSON.parse(nf); if (o.country) return String(o.country).toUpperCase(); }catch{} }
-  const cf=h["cf-ipcountry"]||h["cf-edge-country"]; if (cf) return String(cf).toUpperCase();
-  const vercel=h["x-vercel-ip-country"]; if (vercel) return String(vercel).toUpperCase();
+function getCountry(req) {
+  const h = req.headers;
+  
+  // Try platform-specific headers first
+  const nf = h["x-nf-geo"]; 
+  if (nf) { 
+    try { 
+      const o = JSON.parse(nf); 
+      if (o.country) return String(o.country).toUpperCase(); 
+    } catch {} 
+  }
+  
+  const cf = h["cf-ipcountry"] || h["cf-edge-country"]; 
+  if (cf) return String(cf).toUpperCase();
+  
+  const vercel = h["x-vercel-ip-country"]; 
+  if (vercel) return String(vercel).toUpperCase();
+  
+  const fly = h["fly-client-ip"]; // Fly.io
+  if (fly) {
+    // Fly.io includes country in some headers
+    const region = h["fly-region"]; // Sometimes contains country info
+    if (region && region.length === 3) return region.toUpperCase();
+  }
+  
+  const railway = h["x-railway-region"]; // Railway
+  if (railway) {
+    // Extract country code if present (e.g., "us-east-1" -> "US")
+    const match = railway.match(/^([a-z]{2})-/i);
+    if (match) return match[1].toUpperCase();
+  }
+  
+  // Fallback to geoip lookup
   if (geoip) {
     const ip = getClientIp(req);
-    const look = geoip.lookup(ip);
-    if (look && look.country) return String(look.country).toUpperCase();
+    if (ip && ip !== "127.0.0.1" && ip !== "::1" && !ip.startsWith("10.") && !ip.startsWith("192.168.")) {
+      const look = geoip.lookup(ip);
+      if (look && look.country) return String(look.country).toUpperCase();
+    }
   }
+  
   return null;
 }
 
-function getASN(req){ const asn=req.headers["cf-asn"]||req.headers["x-asn"]; return asn?String(asn).toUpperCase():null; }
+function getASN(req) { 
+  const asn = req.headers["cf-asn"] || req.headers["x-asn"] || req.headers["x-vercel-ip-asn"];
+  return asn ? String(asn).toUpperCase() : null; 
+}
 
 // ================== SECURITY POLICY FUNCTIONS ==================
 const ALLOWED_COUNTRIES = (process.env.ALLOWED_COUNTRIES || "").split(",").map(s=>s.trim().toUpperCase()).filter(Boolean);
