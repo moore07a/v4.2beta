@@ -41,10 +41,8 @@ const trustProxy = (() => {
   if (raw.toLowerCase() === 'false') return false;
   if (Number.isFinite(+raw) && +raw >= 0) return +raw;
   
-  // For platform-specific settings
-  if (process.env.VERCEL) return 1;
-  if (process.env.NETLIFY) return 1;
-  if (process.env.RENDER) return 1;
+  // Platform-specific defaults (these are nice-to-have, not critical)
+  if (process.env.VERCEL || process.env.NETLIFY || process.env.RENDER) return 1;
   
   return true; // Fallback to trusting all
 })();
@@ -52,7 +50,7 @@ const trustProxy = (() => {
 app.set('trust proxy', trustProxy);
 console.log(`[PROXY] Trust proxy setting: ${trustProxy}`);
 
-// --- Global security headers (CSP + PAT) ---
+// ------------ Global security headers (CSP + PAT) ---------------
 app.use((req, res, next) => {
   // avoid caching challenge pages/tokens
   res.setHeader("Cache-Control", "no-store");
