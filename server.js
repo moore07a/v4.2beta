@@ -1882,36 +1882,39 @@ function isValidIpAddress(ip) {
   if (!ip || typeof ip !== 'string') return false;
   
   // IPv4 validation
-  if (/^(\d{1,3}\.){3}\d{1,3}$/.test(ip)) {
-    const octets = ip.split('.');
-    return octets.every(octet => {
+  const ipv4Regex = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+  const ipv4Match = ip.match(ipv4Regex);
+  if (ipv4Match) {
+    return ipv4Match.slice(1).every(octet => {
       const num = parseInt(octet, 10);
-      return num >= 0 && num <= 255 && !isNaN(num);
+      return num >= 0 && num <= 255;
     });
   }
   
-  // IPv6 validation (basic)
-  if (/^[0-9a-fA-F:]+$/.test(ip)) {
-    return true; // Basic IPv6 format check
-  }
-  
-  return false;
+  // IPv6 validation (more comprehensive)
+  const ipv6Regex = /^([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$|^::1$|^([0-9a-fA-F]{1,4}:){1,7}:|^([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}$/;
+  return ipv6Regex.test(ip);
 }
 
 app.post("/admin/unban", (req, res) => {
-  if (!isAdmin(req)) return res.status(403).send("Forbidden");
-  const ip = String(req.query.ip||"").trim();
-  if (!ip) return res.status(400).send("ip required");
-  
-  // Validate IP format
-  if (!isValidIpAddress(ip)) {
-    return res.status(400).json({error: "Invalid IP address format"});
+  try {
+    if (!isAdmin(req)) return res.status(403).send("Forbidden");
+    const ip = String(req.query.ip||"").trim();
+    if (!ip) return res.status(400).send("ip required");
+    
+    // Validate IP format
+    if (!isValidIpAddress(ip)) {
+      return res.status(400).json({error: "Invalid IP address format"});
+    }
+    
+    const safeIp = sanitizeIpForKey(ip);
+    if (!inMemBans.has(safeIp)) return res.json({ok:true, message:"not banned"});
+    inMemBans.delete(safeIp);
+    return res.json({ok:true, message:"unbanned", ip});
+  } catch (error) {
+    addLog(`[ADMIN-ERROR] unban: ${error.message}`);
+    return res.status(500).json({error: "Internal server error"});
   }
-  
-  const safeIp = sanitizeIpForKey(ip);
-  if (!inMemBans.has(safeIp)) return res.json({ok:true, message:"not banned"});
-  inMemBans.delete(safeIp);
-  return res.json({ok:true, message:"unbanned", ip});
 });
 
 app.post("/admin/strike-reset", (req, res) => {
@@ -2366,6 +2369,17 @@ app.listen(PORT, async () => {
 
   checkTurnstileReachable();
   setInterval(checkTurnstileReachable, HEALTH_INTERVAL_MS);
+
+  // Add memory cleanup interval (NEW)
+  setInterval(() => {
+    const now = Date.now();
+    // Clean old rate limit buckets (older than 1 hour)
+    for (const [key, value] of inMemBuckets.entries()) {
+      if (now - value.ts > 3600000) { // 1 hour
+        inMemBuckets.delete(key);
+      }
+    }
+  }, 300000); // Run every 5 minutes
 
   addLog(`🚀 Server running on port ${PORT}`);
   addLog(startupSummary());
