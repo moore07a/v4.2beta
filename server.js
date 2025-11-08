@@ -672,11 +672,14 @@ if (DEBUG_SHOW_KEYS_ON_START) {
 
 // ================== CHALLENGE TOKEN FUNCTIONS ==================
 function createChallengeToken(nextEnc) {
-  const exp = Date.now() + (10 * 60 * 1000);
+  const raw = parseInt(process.env.CHALLENGE_TOKEN_TTL_MIN || "10", 10);
+  const ttlMin = Number.isFinite(raw) && raw > 0 ? raw : 10; // guard
+  const exp = Date.now() + ttlMin * 60 * 1000;
+
   const payload = { next: nextEnc, exp, ts: Date.now() };
   const token = Buffer.from(JSON.stringify(payload)).toString('base64url');
   const sig = crypto.createHmac('sha256', process.env.ADMIN_TOKEN)
-                   .update(token).digest('base64url');
+                    .update(token).digest('base64url');
   return `${token}.${sig}`;
 }
 
@@ -1674,20 +1677,25 @@ if (process.env.IP_DEBUG === '1') {
 }
 
 // ================== ROUTES ==================
-app.post("/decrypt-challenge-data", 
+app.post("/decrypt-challenge-data",
   express.json({ limit: "1kb" }),
   (req, res) => {
     const { data } = req.body || {};
     if (!data) return res.json({ success: false, error: "No data" });
-    
+
     const payload = decryptChallengeData(data);
     if (!payload) return res.json({ success: false, error: "Decryption failed" });
-    
-    if (Date.now() - payload.ts > 5 * 60 * 1000) {
+
+    const raw = parseInt(process.env.CHALLENGE_PAYLOAD_TTL_MIN || "5", 10);
+    const ttlMin = Number.isFinite(raw) && raw > 0 ? raw : 5; // guard
+
+    // extra sanity: ensure payload.ts is a number
+    const issuedAt = typeof payload.ts === "number" ? payload.ts : 0;
+    if (Date.now() - issuedAt > ttlMin * 60 * 1000) {
       return res.json({ success: false, error: "Payload expired" });
     }
-    
-    res.json({ success: true, payload });
+
+    return res.json({ success: true, payload });
   }
 );
 
