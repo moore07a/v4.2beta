@@ -357,7 +357,6 @@ function tryDecryptAny(segment) {
   if (!segment) return { url: null, tried: [], lastErr: null };
 
   let s = safeDecode(segment);
-  if (s.startsWith("_")) s = s.slice(1);
 
   const tried = [];
   let lastErr = null;
@@ -2312,7 +2311,7 @@ let __tsRetries = 0;
 </head><body>
   <div class="card">
     <h3>Verify you are human by completing the action below.</h3>
-    <p class="muted">IAA needs to review the security of your connection before proceeding.</p>
+    <p class="muted">We needs to review the security of your connection before proceeding.</p>
     <div id="ts" aria-live="polite"></div>
     <p id="status" class="status muted">Loading…</p>
     <noscript><p class="err">Turnstile requires JavaScript. Please enable JS and refresh.</p></noscript>
