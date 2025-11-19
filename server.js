@@ -2118,8 +2118,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     backdrop-filter:blur(1px);
     animation: pulse 1.2s ease-in-out infinite;
   }
-  .card.busy #ts iframe,
-  .card.busy #ts > .ts-placeholder{ visibility:hidden; }
+  .card.busy #ts iframe{ visibility:hidden; }
   @keyframes pulse{
     0%{ opacity:0.15; }
     50%{ opacity:0.35; }
@@ -2128,8 +2127,11 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   h2{ margin:0 0 10px; font-size:clamp(26px,3.4vw,38px); letter-spacing:.2px; }
   .muted{ color:var(--muted); }
   #ts{ display:inline-block; margin-top:12px; min-height:70px; }
-  #ts .ts-placeholder{
-    width:100%; height:70px;
+  #ts:empty::before{
+    content:"";
+    display:block;
+    width:100%;
+    height:70px;
     border-radius:6px;
     background:rgba(255,255,255,0.02);
     border:1px dashed rgba(255,255,255,0.08);
@@ -2247,36 +2249,12 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   }
 
   function destroyTurnstileWidget(){
-    if (window.turnstile) {
-      if (__tsWidgetId) {
-        try { window.turnstile.remove(__tsWidgetId); } catch(_){}
-        __tsWidgetId = null;
-      } else {
-        try { window.turnstile.remove('#ts'); } catch(_){}
-      }
+    if (window.turnstile && __tsWidgetId) {
+      try { window.turnstile.remove(__tsWidgetId); } catch(_){}
+      __tsWidgetId = null;
     }
     const host = document.getElementById('ts');
-    if (host) host.innerHTML = '<div class="ts-placeholder" aria-hidden="true"></div>';
-  }
-
-  document.addEventListener('DOMContentLoaded', () => {
-    const maxEl = document.getElementById('retry-max');
-    if (maxEl) maxEl.textContent = String(__tsMaxRetries + 1);
-  }, { once:true });
-
-  function toggleRetryNotice(active, attempt){
-    const retry = document.getElementById('retry');
-    const attemptEl = document.getElementById('retry-attempt');
-    const card = document.querySelector('.card');
-    if (!retry || !card) return;
-    if (active) {
-      retry.style.display = 'block';
-      if (attempt && attemptEl) attemptEl.textContent = String(attempt);
-      card.classList.add('busy');
-    } else {
-      retry.style.display = 'none';
-      card.classList.remove('busy');
-    }
+    if (host) host.textContent = '';
   }
 
   function renderTurnstile(sitekey, cdata){
@@ -2298,9 +2276,8 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     s.textContent = 'Reconnecting to security check…';
     console.warn('Turnstile error code:', errCode);
 
-    // Immediately tear down the broken iframe so the Cloudflare error UI
-    // doesn't stay visible during our retry back-off window.
-    destroyTurnstileWidget();
+    // Keep the iframe mounted so Turnstile can finish its callbacks while the
+    // busy overlay hides it. We'll clean it up right before the next render.
 
     // bounded backoff: ~0.8s, 1.6s, 2.4s
     if (__tsRetries < __tsMaxRetries) {
