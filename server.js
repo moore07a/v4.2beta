@@ -2114,10 +2114,11 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     position:absolute;
     inset:0;
     border-radius:inherit;
-    background:rgba(12,17,22,0.65);
-    backdrop-filter:blur(1px);
+    background:rgba(12,17,22,0.85);
+    backdrop-filter:blur(2px);
     animation: pulse 1.2s ease-in-out infinite;
   }
+  .card.busy #ts{ visibility:hidden; }
   .card.busy #ts iframe{ visibility:hidden; }
   @keyframes pulse{
     0%{ opacity:0.15; }
