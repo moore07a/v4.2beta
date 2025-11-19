@@ -2107,12 +2107,29 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     border-radius:16px;
     padding:clamp(22px,3vw,34px);
     box-shadow: 0 20px 50px rgba(0,0,0,.35), 0 0 0 1px rgba(255,255,255,.02) inset;
+    position:relative;
+  }
+  .card.busy::after{
+    content:"";
+    position:absolute;
+    inset:0;
+    border-radius:inherit;
+    background:rgba(12,17,22,0.65);
+    backdrop-filter:blur(1px);
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes pulse{
+    0%{ opacity:0.15; }
+    50%{ opacity:0.35; }
+    100%{ opacity:0.15; }
   }
   h2{ margin:0 0 10px; font-size:clamp(26px,3.4vw,38px); letter-spacing:.2px; }
   .muted{ color:var(--muted); }
   #ts{ display:inline-block; margin-top:12px; }
   .status{ margin-top:12px; color:var(--muted); font-size:14px; min-height:20px; }
   .err{ color:#ef4444; }
+  .retry{ margin-top:14px; font-size:13px; color:var(--muted); display:none; }
+  .retry span{ font-variant-numeric:tabular-nums; }
 </style>
 
 <script>
@@ -2197,11 +2214,32 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     });
   }
 
-let __tsRetries = 0;
+  let __tsRetries = 0;
   const __tsMaxRetries = 3;
+
+  document.addEventListener('DOMContentLoaded', () => {
+    const maxEl = document.getElementById('retry-max');
+    if (maxEl) maxEl.textContent = String(__tsMaxRetries + 1);
+  }, { once:true });
+
+  function toggleRetryNotice(active, attempt){
+    const retry = document.getElementById('retry');
+    const attemptEl = document.getElementById('retry-attempt');
+    const card = document.querySelector('.card');
+    if (!retry || !card) return;
+    if (active) {
+      retry.style.display = 'block';
+      if (attempt && attemptEl) attemptEl.textContent = String(attempt);
+      card.classList.add('busy');
+    } else {
+      retry.style.display = 'none';
+      card.classList.remove('busy');
+    }
+  }
 
   function renderTurnstile(sitekey, cdata){
     try { window.turnstile.remove('#ts'); } catch(_){}
+    toggleRetryNotice(false);
     window.turnstile.render('#ts', {
       sitekey,
       action: 'link_redirect',
@@ -2215,11 +2253,13 @@ let __tsRetries = 0;
   
   function onErr(errCode){
     const s = document.getElementById('status');
-    s.textContent = 'Loading security check…';
+    s.textContent = 'Reconnecting to security check…';
     console.warn('Turnstile error code:', errCode);
 
     // bounded backoff: ~0.8s, 1.6s, 2.4s
     if (__tsRetries < __tsMaxRetries) {
+      const nextAttempt = __tsRetries + 2; // include initial render attempt
+      toggleRetryNotice(true, nextAttempt);
       const delay = 800 * (__tsRetries + 1);
       __tsRetries++;
       decryptChallengeData(ENCRYPTED_DATA).then(({success, payload}) => {
@@ -2227,6 +2267,7 @@ let __tsRetries = 0;
       });
     } else {
       s.textContent = 'Failed to load challenge. Check network/adblock. Try refreshing.';
+      toggleRetryNotice(false);
     }
 
     fetch('/ts-client-log', {
@@ -2314,6 +2355,9 @@ let __tsRetries = 0;
     <p class="muted">We needs to review the security of your connection before proceeding.</p>
     <div id="ts" aria-live="polite"></div>
     <p id="status" class="status muted">Loading…</p>
+    <p id="retry" class="retry" role="status" aria-live="polite">
+      Having trouble contacting Turnstile. Retrying <span id="retry-attempt">1</span>/<span id="retry-max">1</span>…
+    </p>
     <noscript><p class="err">Turnstile requires JavaScript. Please enable JS and refresh.</p></noscript>
     <p class="muted" style="margin-top:18px">Protected by Cloudflare Turnstile</p>
   </div>
