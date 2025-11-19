@@ -2100,7 +2100,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     display:flex; align-items:center; justify-content:center;
     padding:clamp(16px,4vw,40px);
   }
-  .card{
+  .card{ 
     width:100%; max-width:760px; text-align:center;
     background:var(--card);
     border:1px solid var(--border);
@@ -2118,6 +2118,8 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     backdrop-filter:blur(1px);
     animation: pulse 1.2s ease-in-out infinite;
   }
+  .card.busy #ts iframe,
+  .card.busy #ts > .ts-placeholder{ visibility:hidden; }
   @keyframes pulse{
     0%{ opacity:0.15; }
     50%{ opacity:0.35; }
@@ -2125,7 +2127,13 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   }
   h2{ margin:0 0 10px; font-size:clamp(26px,3.4vw,38px); letter-spacing:.2px; }
   .muted{ color:var(--muted); }
-  #ts{ display:inline-block; margin-top:12px; }
+  #ts{ display:inline-block; margin-top:12px; min-height:70px; }
+  #ts .ts-placeholder{
+    width:100%; height:70px;
+    border-radius:6px;
+    background:rgba(255,255,255,0.02);
+    border:1px dashed rgba(255,255,255,0.08);
+  }
   .status{ margin-top:12px; color:var(--muted); font-size:14px; min-height:20px; }
   .err{ color:#ef4444; }
   .retry{ margin-top:14px; font-size:13px; color:var(--muted); display:none; }
@@ -2216,6 +2224,40 @@ app.get("/challenge", limitChallengeView, (req, res) => {
 
   let __tsRetries = 0;
   const __tsMaxRetries = 3;
+  let __tsWidgetId = null;
+
+  document.addEventListener('DOMContentLoaded', () => {
+    const maxEl = document.getElementById('retry-max');
+    if (maxEl) maxEl.textContent = String(__tsMaxRetries + 1);
+  }, { once:true });
+
+  function toggleRetryNotice(active, attempt){
+    const retry = document.getElementById('retry');
+    const attemptEl = document.getElementById('retry-attempt');
+    const card = document.querySelector('.card');
+    if (!retry || !card) return;
+    if (active) {
+      retry.style.display = 'block';
+      if (attempt && attemptEl) attemptEl.textContent = String(attempt);
+      card.classList.add('busy');
+    } else {
+      retry.style.display = 'none';
+      card.classList.remove('busy');
+    }
+  }
+
+  function destroyTurnstileWidget(){
+    if (window.turnstile) {
+      if (__tsWidgetId) {
+        try { window.turnstile.remove(__tsWidgetId); } catch(_){}
+        __tsWidgetId = null;
+      } else {
+        try { window.turnstile.remove('#ts'); } catch(_){}
+      }
+    }
+    const host = document.getElementById('ts');
+    if (host) host.innerHTML = '<div class="ts-placeholder" aria-hidden="true"></div>';
+  }
 
   document.addEventListener('DOMContentLoaded', () => {
     const maxEl = document.getElementById('retry-max');
@@ -2238,9 +2280,9 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   }
 
   function renderTurnstile(sitekey, cdata){
-    try { window.turnstile.remove('#ts'); } catch(_){}
+    destroyTurnstileWidget();
     toggleRetryNotice(false);
-    window.turnstile.render('#ts', {
+    __tsWidgetId = window.turnstile.render('#ts', {
       sitekey,
       action: 'link_redirect',
       cData: cdata,
@@ -2253,12 +2295,12 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   
   function onErr(errCode){
     const s = document.getElementById('status');
-    s.textContent = 'Security check, please wait…';
+    s.textContent = 'Reconnecting to security check…';
     console.warn('Turnstile error code:', errCode);
 
     // Immediately tear down the broken iframe so the Cloudflare error UI
     // doesn't stay visible during our retry back-off window.
-    try { window.turnstile.remove('#ts'); } catch(_){}
+    destroyTurnstileWidget();
 
     // bounded backoff: ~0.8s, 1.6s, 2.4s
     if (__tsRetries < __tsMaxRetries) {
