@@ -167,6 +167,15 @@ function sanitizeOneLine(s) {
 
 const sanitizeLogLine = sanitizeOneLine;
 
+function escapeHtml(str) {
+  return String(str ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 // Keep all your existing functions as they are...
 function safeDecode(s) {
   try { return decodeURIComponent(s); } catch { return s; }
@@ -1325,6 +1334,7 @@ const limitSseUnauth   = makeIpLimiter({ capacity: parseInt(process.env.SSE_UNAU
 // ================== CORE REDIRECT LOGIC ==================
 function renderScannerSafePage(res, nextEnc, reason = "Pre-scan") {
   const challengeToken = createChallengeToken(nextEnc);
+  const safeReason = escapeHtml(reason || "Pre-scan");
   res.setHeader("Cache-Control", "no-store");
   res.type("html").send(`<!doctype html><meta charset="utf-8">
 <title>Checking link…</title>
@@ -1333,7 +1343,7 @@ function renderScannerSafePage(res, nextEnc, reason = "Pre-scan") {
   <h1>Checking this link</h1>
   <p>This link was pre-scanned by security software. If you're the recipient, click continue.</p>
   <p><a href="/challenge?ct=${encodeURIComponent(challengeToken)}" rel="noopener">Continue</a></p>
-  <p style="color:#6b7280;font-size:14px">Reason: ${reason}</p>
+  <p style="color:#6b7280;font-size:14px">Reason: ${safeReason}</p>
 </body>`);
 }
 
@@ -2084,6 +2094,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   :root{
     --bg:#0c1116; --card:#0c1116; --text:#e8eef6; --muted:#93a1b2;
     --accent:#0ea5e9; --ring:rgba(255,255,255,0.05); --border:rgba(255,255,255,0.06);
+    --ts-height:82px; --retry-height:20px;
   }
   @media (prefers-color-scheme: light){
     :root{
@@ -2127,16 +2138,23 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   }
   h2{ margin:0 0 10px; font-size:clamp(26px,3.4vw,38px); letter-spacing:.2px; }
   .muted{ color:var(--muted); }
-  #ts{ display:inline-block; margin-top:12px; min-height:70px; }
+  #ts{
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    margin-top:12px;
+    min-height:var(--ts-height);
+  }
   #ts:empty::before{
     content:"";
     display:block;
     width:100%;
-    height:70px;
+    height:var(--ts-height);
     border-radius:6px;
     background:rgba(255,255,255,0.02);
     border:1px dashed rgba(255,255,255,0.08);
   }
+  #ts iframe{ min-height:var(--ts-height); }
   .status{
     margin-top:12px;
     color:var(--muted);
@@ -2149,7 +2167,15 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     text-align:center;
   }
   .err{ color:#ef4444; }
-  .retry{ margin-top:14px; font-size:13px; color:var(--muted); display:none; }
+  .retry{
+    margin-top:14px;
+    font-size:13px;
+    color:var(--muted);
+    min-height:var(--retry-height);
+    opacity:0;
+    transition:opacity .18s ease;
+  }
+  .retry.visible{ opacity:1; }
   .retry span{ font-variant-numeric:tabular-nums; }
 </style>
 
@@ -2250,11 +2276,13 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     const card = document.querySelector('.card');
     if (!retry || !card) return;
     if (active) {
-      retry.style.display = 'block';
+      retry.classList.add('visible');
+      retry.setAttribute('aria-hidden', 'false');
       if (attempt && attemptEl) attemptEl.textContent = String(attempt);
       card.classList.add('busy');
     } else {
-      retry.style.display = 'none';
+      retry.classList.remove('visible');
+      retry.setAttribute('aria-hidden', 'true');
       card.classList.remove('busy');
     }
   }
@@ -2284,7 +2312,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   
   function onErr(errCode){
     const s = document.getElementById('status');
-    s.textContent = 'Security check,please wait…';
+    s.textContent = 'Reconnecting to security check…';
     console.warn('Turnstile error code:', errCode);
 
     // Keep the iframe mounted so Turnstile can finish its callbacks while the
@@ -2386,7 +2414,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
 </head><body>
   <div class="card">
     <h3>Verify you are human by completing the action below.</h3>
-    <p class="muted">IAA needs to review the security of your connection before proceeding.</p>
+    <p class="muted">We needs to review the security of your connection before proceeding.</p>
     <div id="ts" aria-live="polite"></div>
     <p id="status" class="status muted">Loading…</p>
     <p id="retry" class="retry" role="status" aria-live="polite">
