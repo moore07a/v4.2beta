@@ -2137,7 +2137,17 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     background:rgba(255,255,255,0.02);
     border:1px dashed rgba(255,255,255,0.08);
   }
-  .status{ margin-top:12px; color:var(--muted); font-size:14px; min-height:20px; }
+  .status{
+    margin-top:12px;
+    color:var(--muted);
+    font-size:14px;
+    min-height:32px;
+    padding:4px 12px;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    text-align:center;
+  }
   .err{ color:#ef4444; }
   .retry{ margin-top:14px; font-size:13px; color:var(--muted); display:none; }
   .retry span{ font-variant-numeric:tabular-nums; }
