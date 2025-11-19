@@ -2253,7 +2253,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   
   function onErr(errCode){
     const s = document.getElementById('status');
-    s.textContent = 'Reconnecting to security check…';
+    s.textContent = 'Security check, please wait…';
     console.warn('Turnstile error code:', errCode);
 
     // Immediately tear down the broken iframe so the Cloudflare error UI
