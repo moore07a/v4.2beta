@@ -2256,6 +2256,10 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     s.textContent = 'Reconnecting to security check…';
     console.warn('Turnstile error code:', errCode);
 
+    // Immediately tear down the broken iframe so the Cloudflare error UI
+    // doesn't stay visible during our retry back-off window.
+    try { window.turnstile.remove('#ts'); } catch(_){}
+
     // bounded backoff: ~0.8s, 1.6s, 2.4s
     if (__tsRetries < __tsMaxRetries) {
       const nextAttempt = __tsRetries + 2; // include initial render attempt
