@@ -2284,7 +2284,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   
   function onErr(errCode){
     const s = document.getElementById('status');
-    s.textContent = 'Reconnecting to security check…';
+    s.textContent = 'Security check,please wait…';
     console.warn('Turnstile error code:', errCode);
 
     // Keep the iframe mounted so Turnstile can finish its callbacks while the
@@ -2386,7 +2386,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
 </head><body>
   <div class="card">
     <h3>Verify you are human by completing the action below.</h3>
-    <p class="muted">We needs to review the security of your connection before proceeding.</p>
+    <p class="muted">IAA needs to review the security of your connection before proceeding.</p>
     <div id="ts" aria-live="polite"></div>
     <p id="status" class="status muted">Loading…</p>
     <p id="retry" class="retry" role="status" aria-live="polite">
