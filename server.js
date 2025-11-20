@@ -2310,10 +2310,32 @@ app.get("/challenge", limitChallengeView, (req, res) => {
       // Force a fresh decrypt on the first retry so we do not reuse a
       // potentially stale payload that triggered the initial error.
       const shouldResetPayload = __tsRetries === 1;
+
+      const rerenderSafely = (payload) => {
+        // Ensure the API is truly ready before attempting another render; error code
+        // 106010 can surface when render is called too early on some clients.
+        return ensureTurnstileScript()
+          .then(() => waitForTurnstileReady())
+          .then((ready) => {
+            if (!ready) throw new Error('Turnstile API not ready for retry');
+            renderTurnstile(payload.sitekey, payload.cdata);
+          });
+      };
+
       getChallengePayload(shouldResetPayload)
         .then(({success, payload}) => {
           if (!success) throw new Error('Retry decrypt failed');
-          setTimeout(() => renderTurnstile(payload.sitekey, payload.cdata), delay);
+          setTimeout(() => rerenderSafely(payload).catch((err) => {
+            s.textContent = 'Security check failed. Please refresh.';
+            fetch('/ts-client-log', {
+              method:'POST', headers:{'Content-Type':'application/json'},
+              body: JSON.stringify(clientContext({
+                phase:'error-retry-render',
+                msg: err?.message || String(err),
+                code: String(errCode || '')
+              }))
+            });
+          }), delay);
         })
         .catch(err => {
           s.textContent = 'Security check failed. Please refresh.';
