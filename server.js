@@ -2116,11 +2116,15 @@ app.get("/challenge", limitChallengeView, (req, res) => {
 </style>
 
 <script>
-    const ENCRYPTED_DATA = ${JSON.stringify(encryptedData)};
+  const ENCRYPTED_DATA = ${JSON.stringify(encryptedData)};
   const TURNSTILE_SCRIPT_SRC = "${TURNSTILE_ORIGIN}/turnstile/v0/api.js?render=explicit";
   const TURNSTILE_SCRIPT_ID = "cf-turnstile-script";
 
+  // FIX: Track widget state to prevent duplicates
+  let widgetRendered = false;
+  let currentWidgetId = null;
   window.__sid = (Math.random().toString(36).slice(2) + Date.now().toString(36));
+  
   function clientContext(extra = {}) {
     return {
       phase: extra.phase || 'context',
@@ -2164,10 +2168,6 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     }).then(r => r.json());
   }
 
-  // Cache the decrypted payload so retries do not refetch (avoids a race where the first
-  // render fails while we are still decrypting). If the first attempt fails (expired payload,
-  // transient network blip), reset the cache on the next retry so we actually attempt a
-  // fresh fetch.
   const getChallengePayload = (() => {
     let cached = null;
     return (reset = false) => {
@@ -2177,15 +2177,11 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     };
   })();
 
-  // Wait for the Turnstile API to be attached, with a bounded timeout so we do not fail
-  // instantly when the script is slow or temporarily blocked. Resolve false instead of
-  // rejecting on timeout so callers can retry or reload the script.
   function waitForTurnstileReady(maxWaitMs = 8000) {
     return new Promise((resolve) => {
       const start = Date.now();
       
       function check() {
-        // Check if both turnstile object exists AND render function is available
         if (window.turnstile && typeof window.turnstile.render === 'function') {
           resolve(true);
           return;
@@ -2203,13 +2199,20 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     });
   }
 
-  // Ensure the Turnstile script is present (re-load if an ad blocker removed it)
+  // FIX: Improved script loading with better state management
   function ensureTurnstileScript(options = {}) {
     const { forceReload = false } = options || {};
 
     return new Promise((resolve, reject) => {
       if (forceReload && window.turnstile) {
-        try { delete window.turnstile; } catch (_) {}
+        try { 
+          // Clean up any existing widget before reloading
+          if (typeof window.turnstile.remove === 'function' && currentWidgetId) {
+            window.turnstile.remove(currentWidgetId);
+            currentWidgetId = null;
+          }
+          delete window.turnstile; 
+        } catch (_) {}
       }
 
       if (window.turnstile && !forceReload) return resolve('already-loaded');
@@ -2225,7 +2228,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
           return ensureTurnstileScript().then(resolve).catch(reject);
         }
         if (existing.dataset.loaded === '1') return resolve('cached');
-        existing.addEventListener('load', () => resolve('load')); // fall back to events
+        existing.addEventListener('load', () => resolve('load'));
         existing.addEventListener('error', () => reject(new Error('Turnstile script failed to load')));
         return;
       }
@@ -2251,7 +2254,13 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   }
 
   function onOK(token){
-    const s = document.getElementById('status'); s.textContent = 'Verifying…';
+    const s = document.getElementById('status'); 
+    s.textContent = 'Verifying…';
+    
+    // FIX: Prevent multiple submissions
+    if (window.submissionInProgress) return;
+    window.submissionInProgress = true;
+
     getChallengePayload().then(data => {
       if (!data.success) throw new Error('Decryption failed');
 
@@ -2270,6 +2279,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
         location.href = '/r?d=' + encodeURIComponent(base) + suffix;
       } catch(e) {
         s.textContent = 'Navigation error. Please retry.';
+        window.submissionInProgress = false;
         fetch('/ts-client-log', {
           method:'POST', headers:{'Content-Type':'application/json'},
           body: JSON.stringify(clientContext({ phase:'callback-nav', msg:e.message, stack:e.stack }))
@@ -2277,6 +2287,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
       }
     }).catch(e => {
       s.textContent = 'Security error. Please refresh.';
+      window.submissionInProgress = false;
       fetch('/ts-client-log', {
         method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify(clientContext({ phase:'decrypt-error', msg:e.message }))
@@ -2285,25 +2296,51 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   }
 
   let __tsRetries = 0;
-  const __tsMaxRetries = 3;
+  const __tsMaxRetries = 2; // FIX: Reduced retries to prevent duplicates
 
+  // FIX: Improved render function with proper cleanup
   function renderTurnstile(sitekey, cdata) {
-    try { 
-      if (window.turnstile && typeof window.turnstile.remove === 'function') {
-        window.turnstile.remove('#ts'); 
+    // Always remove any existing widget first
+    if (window.turnstile && typeof window.turnstile.remove === 'function' && currentWidgetId) {
+      try {
+        window.turnstile.remove(currentWidgetId);
+      } catch (e) {
+        console.warn('Failed to remove previous widget:', e);
       }
-    } catch(_) {}
+      currentWidgetId = null;
+    }
 
-    // Simple direct render - we already verified the API is ready
-    window.turnstile.render('#ts', {
-      sitekey,
-      action: 'link_redirect',
-      cData: cdata,
-      appearance: 'always',
-      callback: onOK,
-      'error-callback': onErr,
-      'timeout-callback': onTimeout
-    });
+    // Clear the container
+    const container = document.getElementById('ts');
+    if (container) {
+      container.innerHTML = '';
+    }
+
+    // Prevent multiple renders
+    if (widgetRendered) {
+      console.warn('Widget already rendered, skipping duplicate');
+      return;
+    }
+
+    try {
+      currentWidgetId = window.turnstile.render('#ts', {
+        sitekey,
+        action: 'link_redirect',
+        cData: cdata,
+        appearance: 'always',
+        callback: onOK,
+        'error-callback': onErr,
+        'timeout-callback': onTimeout
+      });
+      
+      widgetRendered = true;
+      return currentWidgetId;
+    } catch (e) {
+      console.error('Turnstile render failed:', e);
+      widgetRendered = false;
+      currentWidgetId = null;
+      throw e;
+    }
   }
   
   function onErr(errCode){
@@ -2311,33 +2348,29 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     s.textContent = 'Retrying security check…';
     console.warn('Turnstile error code:', errCode);
 
-    // bounded backoff: ~0.4s, 0.8s, 1.2s
+    // Reset widget state for retry
+    widgetRendered = false;
+    currentWidgetId = null;
+
     if (__tsRetries < __tsMaxRetries) {
       const delay = 400 * (__tsRetries + 1);
       __tsRetries++;
-      // Force a fresh decrypt on the first retry so we do not reuse a
-      // potentially stale payload that triggered the initial error.
       const shouldResetPayload = __tsRetries === 1;
 
       const rerenderSafely = (payload, forceReload = false) => {
-        // Ensure the API is truly ready before attempting another render; error code
-        // 106010 can surface when render is called too early on some clients.
-        const reloadScript = forceReload || String(errCode || '') === '106010';
-        const maxWait = reloadScript ? 12000 : undefined;
-
-        return ensureTurnstileScript({ forceReload: reloadScript })
-          .then(() => waitForTurnstileReady(maxWait))
+        return ensureTurnstileScript({ forceReload: forceReload || String(errCode || '') === '106010' })
+          .then(() => waitForTurnstileReady(forceReload ? 12000 : 8000))
           .then((ready) => {
             if (!ready) throw new Error('Turnstile API not ready for retry');
             renderTurnstile(payload.sitekey, payload.cdata);
+            s.textContent = 'Challenge ready.';
           });
       };
 
       getChallengePayload(shouldResetPayload)
         .then(({success, payload}) => {
           if (!success) throw new Error('Retry decrypt failed');
-          const forceReload = __tsRetries > 1 || String(errCode || '') === '106010';
-          setTimeout(() => rerenderSafely(payload, forceReload).catch((err) => {
+          setTimeout(() => rerenderSafely(payload).catch((err) => {
             s.textContent = 'Security check failed. Please refresh.';
             fetch('/ts-client-log', {
               method:'POST', headers:{'Content-Type':'application/json'},
@@ -2361,7 +2394,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
           });
         });
     } else {
-      s.textContent = 'Failed to load challenge. Check network/adblock. Try refreshing.';
+      s.textContent = 'Failed to load challenge. Please refresh the page.';
     }
 
     fetch('/ts-client-log', {
@@ -2370,13 +2403,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
         phase: 'error-callback',
         sid: window.__sid,
         code: String(errCode || ''),
-        webdriver: !!(navigator.webdriver ?? false),
-        hw: navigator.hardwareConcurrency ?? null,
-        mem: navigator.deviceMemory ?? null,
-        plat: navigator.platform ?? null,
-        lang: navigator.language ?? null,
-        tzOff: new Date().getTimezoneOffset(),
-        scr: { w: screen?.width ?? null, h: screen?.height ?? null, dpr: devicePixelRatio ?? null }
+        retryCount: __tsRetries
       }))
     });
   }
@@ -2385,27 +2412,17 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     document.getElementById('status').textContent = 'Challenge timed out. Refresh the page.';
     fetch('/ts-client-log', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(clientContext({ phase:'timeout', webdriver: !!(navigator.webdriver ?? false) }))
+      body: JSON.stringify(clientContext({ phase:'timeout' }))
     });
   }
 
-  const domReady = new Promise((resolve) => {
-    if (document.readyState === 'complete' || document.readyState === 'interactive') {
-      resolve();
-    } else {
-      document.addEventListener('DOMContentLoaded', () => resolve(), { once: true });
-    }
-  });
-
+  // FIX: Simplified boot process with better state management
   let bootStarted = false;
 
   function startBoot(attempt = 0) {
     if (bootStarted && attempt === 0) return;
     bootStarted = true;
-    domReady.then(() => boot(attempt));
-  }
-
-  function boot(attempt = 0) {
+    
     const statusEl = document.getElementById('status');
     statusEl.textContent = attempt ? 'Retrying security check…' : 'Loading security check…';
 
@@ -2419,38 +2436,20 @@ app.get("/challenge", limitChallengeView, (req, res) => {
         return data.payload;
       })
       .then(payload => {
-        // Add extra delay to ensure Turnstile is fully ready
-        return new Promise(resolve => {
-          setTimeout(() => {
-            waitForTurnstileReady(forceReloadScript ? 12000 : 5000).then((ready) => 
-              resolve({ payload, ready })
-            );
-          }, 300);
+        return waitForTurnstileReady(forceReloadScript ? 10000 : 6000).then((ready) => {
+          if (!ready) throw new Error('Turnstile API not ready');
+          renderTurnstile(payload.sitekey, payload.cdata);
+          statusEl.textContent = 'Challenge ready.';
         });
-      })
-      .then(({ payload, ready }) => {
-        if (!ready) throw new Error('Turnstile script not ready');
-        renderTurnstile(payload.sitekey, payload.cdata);
-        statusEl.textContent = 'Challenge ready.';
       })
       .catch(e => {
-        const tooManyRetries = attempt >= 3;
+        const tooManyRetries = attempt >= 2;
         statusEl.textContent = tooManyRetries
-          ? 'Security initialization failed. Check blockers and refresh.'
+          ? 'Security initialization failed. Please refresh.'
           : 'Security initialization hiccup… retrying.';
 
-        fetch('/ts-client-log', {
-          method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify(clientContext({
-            phase: tooManyRetries ? 'boot-failed' : 'boot-retry',
-            msg: e?.message || String(e),
-            attempt
-          }))
-        });
-
         if (!tooManyRetries) {
-          const delay = 400 * (attempt + 1);
-          setTimeout(() => boot(attempt + 1), delay);
+          setTimeout(() => startBoot(attempt + 1), 500 * (attempt + 1));
         }
       });
   }
@@ -2461,104 +2460,32 @@ app.get("/challenge", limitChallengeView, (req, res) => {
       scriptEl.dataset.loaded = '1'; 
       scriptEl.dataset.failed = ''; 
     }
-
-    // Don't start boot immediately - wait for API to be fully ready
-    waitForTurnstileReady(5000).then((ready) => {
-      if (ready) {
-        fetch('/ts-client-log', {
-          method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify(clientContext({
-            phase: 'api-onload-ready',
-            sid: window.__sid,
-            webdriver: !!(navigator.webdriver ?? false),
-          }))
-        });
-        startBoot();
-      } else {
-        // If not ready after 5 seconds, start boot anyway (it will retry)
-        fetch('/ts-client-log', {
-          method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify(clientContext({
-            phase: 'api-onload-not-ready',
-            sid: window.__sid,
-          }))
-        });
-        startBoot();
-      }
-    });
-
-    fetch('/ts-client-log', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(clientContext({
-        phase: 'api-onload-explicit',
-        sid: window.__sid,
-        webdriver: !!(navigator.webdriver ?? false),
-        hw: navigator.hardwareConcurrency ?? null,
-        mem: navigator.deviceMemory ?? null,
-        plat: navigator.platform ?? null,
-        lang: navigator.language ?? null,
-        tzOff: new Date().getTimezoneOffset(),
-        scr: { 
-          w: screen?.width ?? null,
-          h: screen?.height ?? null,
-          dpr: window.devicePixelRatio ?? null 
-        }
-      }))
-    });
+    startBoot();
   }
 
   function tsApiOnError(ev){
-    document.getElementById('status').textContent = 'Challenge script failed to load. Check adblock and refresh.';
+    document.getElementById('status').textContent = 'Challenge script failed to load. Please refresh.';
     const scriptEl = document.getElementById(TURNSTILE_SCRIPT_ID);
     if (scriptEl) scriptEl.dataset.failed = '1';
-    fetch('/ts-client-log', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(clientContext({
-        phase:'api-onerror',
-        src: ev && ev.target && ev.target.src || ''
-      }))
-    });
   }
 
-  // If the Turnstile script is blocked (ad blocker, network drop), the onload
-  // handler above will never fire, leaving the page stuck on "Loading…".
-  // Attempt a self-healing load after a brief delay and kick off boot once the
-  // API becomes available.
-  document.addEventListener('DOMContentLoaded', () => {
-    setTimeout(() => {
-      if (bootStarted || window.turnstile) return;
-      const statusEl = document.getElementById('status');
-      if (statusEl) {
-        statusEl.textContent = 'Still loading security check… attempting recovery.';
-      }
-
-      ensureTurnstileScript()
-        .then(() => waitForTurnstileReady())
-        .then((ready) => {
-          if (!ready) throw new Error('Turnstile API not ready after retry');
-          startBoot();
-        })
-        .catch((err) => {
-          const message = err?.message || String(err);
-          if (statusEl) {
-            statusEl.textContent = 'Challenge script failed to load. Check adblock and refresh.';
-          }
-          fetch('/ts-client-log', {
-            method:'POST', headers:{'Content-Type':'application/json'},
-            body: JSON.stringify(clientContext({ phase:'fallback-script-retry', msg: message }))
-          });
-        });
-    }, 1500);
-  });
+  // Start the boot process when DOM is ready
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => {
+      if (!bootStarted) startBoot();
+    });
+  } else {
+    if (!bootStarted) startBoot();
+  }
 </script>
 
-<script id="cf-turnstile-script" src="${TURNSTILE_ORIGIN}/turnstile/v0/api.js?render=explicit"
+<script id="cf-turnstile-script" src="${TURNSTILE_SCRIPT_SRC}"
         onload="tsApiOnLoad(event)"
         onerror="tsApiOnError(event)"></script>
 </head><body>
   <div class="card">
-    <h3>Verify you are human by completing the action below.</h3>
-    <p class="muted">We needs to review the security of your connection before proceeding.</p>
+    <h2>Verify you are human</h2>
+    <p class="muted">We need to review the security of your connection before proceeding.</p>
     <div id="ts" aria-live="polite"></div>
     <p id="status" class="status muted">Loading…</p>
     <noscript><p class="err">Turnstile requires JavaScript. Please enable JS and refresh.</p></noscript>
