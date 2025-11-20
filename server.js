@@ -2253,46 +2253,57 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   let __tsRetries = 0;
   const __tsMaxRetries = 2;
 
-    function safeRenderTurnstile(sitekey, cdata) {
-    if (isRendering) {
-      console.warn('Turnstile render already in progress, skipping duplicate');
-      return Promise.resolve(); // Return resolved promise to avoid breaking the chain
-    }
-    
-    isRendering = true;
-    
+      function safeRenderTurnstile(sitekey, cdata) {
     return new Promise((resolve) => {
+      if (isRendering) {
+        console.warn('🚫 Render already in progress');
+        resolve(null);
+        return;
+      }
+      
+      isRendering = true;
+      
       const tsContainer = document.getElementById('ts');
       if (!tsContainer) {
-        console.error('Turnstile container not found');
+        console.error('❌ Turnstile container not found');
         isRendering = false;
-        resolve();
+        resolve(null);
         return;
       }
 
-      // Double-check no existing widget
-      tsContainer.innerHTML = '';
+      // Nuclear option - complete reset
+      tsContainer.innerHTML = '<div id="ts-inner" style="min-height:65px"></div>';
+      const innerContainer = document.getElementById('ts-inner');
+      
+      if (!innerContainer) {
+        console.error('❌ Inner container creation failed');
+        isRendering = false;
+        resolve(null);
+        return;
+      }
 
+      // Clear any existing widgets
       if (currentWidgetId && window.turnstile && typeof window.turnstile.remove === 'function') {
         try {
           window.turnstile.remove(currentWidgetId);
         } catch (e) {
-          console.warn('Error during widget removal:', e);
+          console.warn('⚠️ During widget removal:', e);
         }
       }
       currentWidgetId = null;
 
-      // Longer delay to ensure complete cleanup
+      // Extended safety delay
       setTimeout(() => {
         if (!window.turnstile || typeof window.turnstile.render !== 'function') {
-          console.error('Turnstile not available for render');
+          console.error('❌ Turnstile API not available');
           isRendering = false;
-          resolve();
+          resolve(null);
           return;
         }
 
         try {
-          const widgetId = window.turnstile.render(tsContainer, {
+          console.log('🎯 Attempting Turnstile render...');
+          const widgetId = window.turnstile.render(innerContainer, {
             sitekey,
             action: 'link_redirect',
             cData: cdata,
@@ -2302,17 +2313,22 @@ app.get("/challenge", limitChallengeView, (req, res) => {
             'timeout-callback': onTimeout
           });
           
-          currentWidgetId = widgetId;
-          console.log('Turnstile widget rendered successfully with ID:', widgetId);
-          resolve(widgetId);
+          if (widgetId) {
+            currentWidgetId = widgetId;
+            console.log('✅ Turnstile render SUCCESS, widget ID:', widgetId);
+            isRendering = false;
+            resolve(widgetId);
+          } else {
+            console.error('❌ Turnstile render returned null widget ID');
+            isRendering = false;
+            resolve(null);
+          }
         } catch (renderError) {
-          console.error('Turnstile render error:', renderError);
-          onErr('render_failed');
-          resolve(null);
-        } finally {
+          console.error('💥 Turnstile render exception:', renderError);
           isRendering = false;
+          resolve(null);
         }
-      }, 200); // Increased delay
+      }, 300); // Conservative delay
     });
   }
   
@@ -2397,7 +2413,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     });
   }
 
-  function startBoot() {
+    function startBoot() {
     const domReady = new Promise((resolve) => {
       if (document.readyState === 'complete' || document.readyState === 'interactive') {
         resolve();
@@ -2410,38 +2426,70 @@ app.get("/challenge", limitChallengeView, (req, res) => {
       const statusEl = document.getElementById('status');
       statusEl.textContent = 'Loading security check…';
 
+      // Step 1: Ensure script is loaded
       ensureTurnstileScript()
         .then(() => getChallengePayload())
         .then(data => {
           if (!data.success) throw new Error(data.error || 'Decryption failed');
           return data.payload;
         })
-          .then(payload => {
-    // Wait for Turnstile to be fully ready with more conservative timing
-    return new Promise((resolve) => {
-      if (window.turnstile && typeof window.turnstile.ready === 'function') {
-        window.turnstile.ready(() => {
-          // Additional safety delay after ready callback
-          setTimeout(() => {
-            resolve(payload);
-          }, 300);
-        });
-      } else {
-        // Longer fallback delay
-        setTimeout(() => {
-          resolve(payload);
-        }, 1500);
-      }
-    });
-  })
-  .then(payload => {
-    return safeRenderTurnstile(payload.sitekey, payload.cdata);
-  })
-  .then(() => {
-    statusEl.textContent = 'Challenge ready.';
-  })
+        .then(payload => {
+          // Step 2: Wait for explicit "fully loaded" signal
+          return new Promise((resolve) => {
+            const checkTurnstileReady = () => {
+              if (window.turnstile && 
+                  typeof window.turnstile.render === 'function' &&
+                  typeof window.turnstile.ready === 'function' &&
+                  typeof window.turnstile.remove === 'function') {
+                
+                // Double-check with ready callback
+                window.turnstile.ready(() => {
+                  // Additional verification that render actually works
+                  setTimeout(() => {
+                    console.log('Turnstile fully confirmed ready');
+                    resolve(payload);
+                  }, 500); // Extra conservative delay
+                });
+                
+              } else {
+                setTimeout(checkTurnstileReady, 100);
+              }
+            };
+            
+            checkTurnstileReady();
+            
+            // Safety timeout
+            setTimeout(() => {
+              console.warn('Turnstile readiness timeout, proceeding anyway');
+              resolve(payload);
+            }, 10000);
+          });
+        })
+        .then(payload => {
+          // Step 3: Render with maximum safety
+          return safeRenderTurnstile(payload.sitekey, payload.cdata);
+        })
+        .then((widgetId) => {
+          if (widgetId) {
+            statusEl.textContent = 'Challenge ready.';
+            console.log('✅ Turnstile rendered successfully on first attempt');
+            
+            // Log success to server
+            fetch('/ts-client-log', {
+              method:'POST', headers:{'Content-Type':'application/json'},
+              body: JSON.stringify(clientContext({
+                phase: 'render-success-first-attempt',
+                sid: window.__sid,
+                widgetId: widgetId
+              }))
+            });
+          } else {
+            throw new Error('Widget rendering failed');
+          }
+        })
         .catch(e => {
           statusEl.textContent = 'Security initialization failed. Please refresh.';
+          console.error('Boot failed:', e);
           fetch('/ts-client-log', {
             method:'POST', headers:{'Content-Type':'application/json'},
             body: JSON.stringify(clientContext({
