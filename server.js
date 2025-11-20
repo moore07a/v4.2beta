@@ -474,6 +474,27 @@ function addSpacer() {
   broadcastLog("", id);
 }
 
+  // Add this at the top of your JavaScript
+  let renderCallCount = 0;
+  const originalRender = window.turnstile?.render;
+
+  if (window.turnstile && typeof window.turnstile.render === 'function') {
+    window.turnstile.render = function(...args) {
+      renderCallCount++;
+      console.log(`🔍 RENDER CALL #${renderCallCount}`, new Error().stack);
+      
+      fetch('/ts-client-log', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(clientContext({
+          phase: `render-call-${renderCallCount}`,
+          stack: new Error().stack?.split('\n').slice(1, 4).join(' | ') // First 3 stack lines
+        }))
+      });
+      
+      return originalRender.apply(this, args);
+    };
+  }
+
 // ================== SECURITY & RATE LIMITING ==================
 const RATE_CAPACITY = parseInt(process.env.RATE_CAPACITY || "5", 10);
 const RATE_WINDOW_SECONDS = parseInt(process.env.RATE_WINDOW_SECONDS || "600", 10);
@@ -2255,8 +2276,24 @@ app.get("/challenge", limitChallengeView, (req, res) => {
 
       function safeRenderTurnstile(sitekey, cdata) {
     return new Promise((resolve) => {
-      if (isRendering) {
-        console.warn('🚫 Render already in progress');
+      // Ultra-defensive check
+      if (isRendering || currentWidgetId) {
+        console.warn('🚫 BLOCKED: Render in progress or widget already exists', {
+          isRendering, 
+          currentWidgetId,
+          stack: new Error().stack
+        });
+        
+        fetch('/ts-client-log', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify(clientContext({
+            phase: 'render-blocked-duplicate',
+            isRendering: isRendering,
+            currentWidgetId: currentWidgetId,
+            stack: new Error().stack?.split('\n').slice(1, 4).join(' | ')
+          }))
+        });
+        
         resolve(null);
         return;
       }
