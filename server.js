@@ -2162,10 +2162,19 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     }).then(r => r.json());
   }
 
+  // Cache the decrypted payload so retries do not refetch (avoids a race where the first
+  // render fails while we are still decrypting).
+  const getChallengePayload = (() => {
+    let cached = null;
+    return () => {
+      if (!cached) cached = decryptChallengeData(ENCRYPTED_DATA);
+      return cached;
+    };
+  })();
+
   function onOK(token){
     const s = document.getElementById('status'); s.textContent = 'Verifying…';
-
-    decryptChallengeData(ENCRYPTED_DATA).then(data => {
+    getChallengePayload().then(data => {
       if (!data.success) throw new Error('Decryption failed');
 
       const { next, lh } = data.payload;
@@ -2215,14 +2224,14 @@ let __tsRetries = 0;
   
   function onErr(errCode){
     const s = document.getElementById('status');
-    s.textContent = 'Loading security check…';
+    s.textContent = 'Retrying security check…';
     console.warn('Turnstile error code:', errCode);
 
-    // bounded backoff: ~0.8s, 1.6s, 2.4s
+    // bounded backoff: ~0.4s, 0.8s, 1.2s
     if (__tsRetries < __tsMaxRetries) {
-      const delay = 800 * (__tsRetries + 1);
+      const delay = 400 * (__tsRetries + 1);
       __tsRetries++;
-      decryptChallengeData(ENCRYPTED_DATA)
+      getChallengePayload()
         .then(({success, payload}) => {
           if (!success) throw new Error('Retry decrypt failed');
           setTimeout(() => renderTurnstile(payload.sitekey, payload.cdata), delay);
@@ -2268,7 +2277,7 @@ let __tsRetries = 0;
   }
 
   function boot(){
-    decryptChallengeData(ENCRYPTED_DATA).then(data => {
+    getChallengePayload().then(data => {
       if (!data.success) throw new Error('Decryption failed');
 
       const { sitekey, cdata } = data.payload;
