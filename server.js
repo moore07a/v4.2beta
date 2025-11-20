@@ -2094,8 +2094,8 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   :root{
     --bg:#0c1116; --card:#0c1116; --text:#e8eef6; --muted:#93a1b2;
     --accent:#0ea5e9; --ring:rgba(255,255,255,0.05); --border:rgba(255,255,255,0.06);
-    --overlay:rgba(12,17,22,0.9);
-    --overlay-light:rgba(255,255,255,0.85);
+    --overlay:rgba(12,17,22,0.55);
+    --overlay-light:rgba(255,255,255,0.6);
     --ts-height:82px; --retry-height:20px;
   }
   @media (prefers-color-scheme: light){
@@ -2113,7 +2113,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     display:flex; align-items:center; justify-content:center;
     padding:clamp(16px,4vw,40px);
   }
-  .card{ 
+  .card{
     width:100%; max-width:760px; text-align:center;
     background:var(--card);
     border:1px solid var(--border);
@@ -2122,6 +2122,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     box-shadow: 0 20px 50px rgba(0,0,0,.35), 0 0 0 1px rgba(255,255,255,.02) inset;
     position:relative;
   }
+  /* Keep the widget visible during retries; the overlay just blocks interaction. */
   .card.busy::after{
     content:"";
     position:absolute;
@@ -2134,8 +2135,6 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   @media (prefers-color-scheme: light){
     .card.busy::after{ background:var(--overlay-light); }
   }
-  .card.busy #ts{ visibility:hidden; }
-  .card.busy #ts iframe{ visibility:hidden; }
   h2{ margin:0 0 10px; font-size:clamp(26px,3.4vw,38px); letter-spacing:.2px; }
   .muted{ color:var(--muted); }
   #ts{
