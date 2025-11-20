@@ -2163,14 +2163,34 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   }
 
   // Cache the decrypted payload so retries do not refetch (avoids a race where the first
-  // render fails while we are still decrypting).
+  // render fails while we are still decrypting). If the first attempt fails (expired payload,
+  // transient network blip), reset the cache on the next retry so we actually attempt a
+  // fresh fetch.
   const getChallengePayload = (() => {
     let cached = null;
-    return () => {
+    return (reset = false) => {
+      if (reset) cached = null;
       if (!cached) cached = decryptChallengeData(ENCRYPTED_DATA);
       return cached;
     };
   })();
+
+  // Wait for the Turnstile API to be attached, with a bounded timeout so we do not fail
+  // instantly when the script is slow or temporarily blocked.
+  function waitForTurnstileReady(maxWaitMs = 6000, intervalMs = 200) {
+    return new Promise((resolve, reject) => {
+      const start = Date.now();
+      const poll = () => {
+        if (window.turnstile && typeof window.turnstile.ready === 'function') {
+          return window.turnstile.ready(() => resolve());
+        }
+        if (window.turnstile) return resolve();
+        if (Date.now() - start > maxWaitMs) return reject(new Error('Turnstile script not loaded'));
+        setTimeout(poll, intervalMs);
+      };
+      poll();
+    });
+  }
 
   function onOK(token){
     const s = document.getElementById('status'); s.textContent = 'Verifying…';
@@ -2206,7 +2226,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     });
   }
 
-let __tsRetries = 0;
+  let __tsRetries = 0;
   const __tsMaxRetries = 3;
 
   function renderTurnstile(sitekey, cdata){
@@ -2286,24 +2306,42 @@ let __tsRetries = 0;
     });
   }
 
-  function boot(){
-    getChallengePayload().then(data => {
-      if (!data.success) throw new Error('Decryption failed');
+  function boot(attempt = 0){
+    const statusEl = document.getElementById('status');
+    statusEl.textContent = attempt ? 'Retrying security check…' : 'Loading security check…';
 
-      const { sitekey, cdata } = data.payload;
+    const resetCache = attempt > 0; // if we are retrying, allow a fresh fetch
 
-      if (!window.turnstile) { setTimeout(boot, 200); return; }
-      // NEW:
-      renderTurnstile(sitekey, cdata);
+    getChallengePayload(resetCache)
+      .then(data => {
+        if (!data.success) throw new Error(data.error || 'Decryption failed');
+        return data.payload;
+      })
+      .then(payload => waitForTurnstileReady().then(() => payload))
+      .then(({ sitekey, cdata }) => {
+        renderTurnstile(sitekey, cdata);
+        statusEl.textContent = 'Challenge ready.';
+      })
+      .catch(e => {
+        const tooManyRetries = attempt >= 2;
+        statusEl.textContent = tooManyRetries
+          ? 'Security initialization failed. Check blockers and refresh.'
+          : 'Security initialization hiccup… retrying.';
 
-      document.getElementById('status').textContent = 'Challenge ready.';
-    }).catch(e => {
-      document.getElementById('status').textContent = 'Security initialization failed. Refresh.';
-      fetch('/ts-client-log', {
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify(clientContext({ phase:'boot-decrypt-error', msg:e.message }))
+        fetch('/ts-client-log', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify(clientContext({
+            phase: tooManyRetries ? 'boot-failed' : 'boot-retry',
+            msg: e?.message || String(e),
+            attempt
+          }))
+        });
+
+        if (!tooManyRetries) {
+          const delay = 400 * (attempt + 1);
+          setTimeout(() => boot(attempt + 1), delay);
+        }
       });
-    });
   }
 
   function tsApiOnLoad(ev){
@@ -2326,6 +2364,7 @@ let __tsRetries = 0;
     boot();
   }
   function tsApiOnError(ev){
+    document.getElementById('status').textContent = 'Challenge script failed to load. Check adblock and refresh.';
     fetch('/ts-client-log', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify(clientContext({
