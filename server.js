@@ -167,15 +167,6 @@ function sanitizeOneLine(s) {
 
 const sanitizeLogLine = sanitizeOneLine;
 
-function escapeHtml(str) {
-  return String(str ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
 // Keep all your existing functions as they are...
 function safeDecode(s) {
   try { return decodeURIComponent(s); } catch { return s; }
@@ -1334,7 +1325,6 @@ const limitSseUnauth   = makeIpLimiter({ capacity: parseInt(process.env.SSE_UNAU
 // ================== CORE REDIRECT LOGIC ==================
 function renderScannerSafePage(res, nextEnc, reason = "Pre-scan") {
   const challengeToken = createChallengeToken(nextEnc);
-  const safeReason = escapeHtml(reason || "Pre-scan");
   res.setHeader("Cache-Control", "no-store");
   res.type("html").send(`<!doctype html><meta charset="utf-8">
 <title>Checking link…</title>
@@ -1343,7 +1333,7 @@ function renderScannerSafePage(res, nextEnc, reason = "Pre-scan") {
   <h1>Checking this link</h1>
   <p>This link was pre-scanned by security software. If you're the recipient, click continue.</p>
   <p><a href="/challenge?ct=${encodeURIComponent(challengeToken)}" rel="noopener">Continue</a></p>
-  <p style="color:#6b7280;font-size:14px">Reason: ${safeReason}</p>
+  <p style="color:#6b7280;font-size:14px">Reason: ${reason}</p>
 </body>`);
 }
 
@@ -2094,9 +2084,6 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   :root{
     --bg:#0c1116; --card:#0c1116; --text:#e8eef6; --muted:#93a1b2;
     --accent:#0ea5e9; --ring:rgba(255,255,255,0.05); --border:rgba(255,255,255,0.06);
-    --overlay:rgba(12,17,22,0.28);
-    --overlay-light:rgba(255,255,255,0.32);
-    --ts-height:82px; --retry-height:20px;
   }
   @media (prefers-color-scheme: light){
     :root{
@@ -2120,67 +2107,12 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     border-radius:16px;
     padding:clamp(22px,3vw,34px);
     box-shadow: 0 20px 50px rgba(0,0,0,.35), 0 0 0 1px rgba(255,255,255,.02) inset;
-    position:relative;
-  }
-  /* Soft busy overlay that avoids harsh flashing while retrying. */
-  .card::after{
-    content:"";
-    position:absolute;
-    inset:0;
-    border-radius:inherit;
-    background:var(--overlay);
-    opacity:0;
-    pointer-events:none;
-    transition:opacity .18s ease;
-    backdrop-filter:blur(1.5px);
-  }
-  .card.busy::after{ opacity:1; }
-  @media (prefers-color-scheme: light){
-    .card::after{ background:var(--overlay-light); }
   }
   h2{ margin:0 0 10px; font-size:clamp(26px,3.4vw,38px); letter-spacing:.2px; }
   .muted{ color:var(--muted); }
-  #ts{
-    display:flex;
-    align-items:center;
-    justify-content:center;
-    margin-top:12px;
-    min-height:var(--ts-height);
-    background:var(--card);
-    border-radius:8px;
-  }
-  #ts:empty::before{
-    content:"";
-    display:block;
-    width:100%;
-    height:var(--ts-height);
-    border-radius:inherit;
-    background:transparent;
-    border:1px dashed var(--border);
-  }
-  #ts iframe{ min-height:var(--ts-height); }
-  .status{
-    margin-top:12px;
-    color:var(--muted);
-    font-size:14px;
-    min-height:32px;
-    padding:4px 12px;
-    display:flex;
-    align-items:center;
-    justify-content:center;
-    text-align:center;
-  }
+  #ts{ display:inline-block; margin-top:12px; }
+  .status{ margin-top:12px; color:var(--muted); font-size:14px; min-height:20px; }
   .err{ color:#ef4444; }
-  .retry{
-    margin-top:14px;
-    font-size:13px;
-    color:var(--muted);
-    min-height:var(--retry-height);
-    opacity:0;
-    transition:opacity .18s ease;
-  }
-  .retry.visible{ opacity:1; }
-  .retry span{ font-variant-numeric:tabular-nums; }
 </style>
 
 <script>
@@ -2230,15 +2162,8 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     }).then(r => r.json());
   }
 
-  function setStatus(text, tone = 'muted'){
-    const s = document.getElementById('status');
-    if (!s) return;
-    s.textContent = text;
-    if (tone === 'err') s.classList.add('err'); else s.classList.remove('err');
-  }
-
   function onOK(token){
-    setStatus('Verifying…');
+    const s = document.getElementById('status'); s.textContent = 'Verifying…';
 
     decryptChallengeData(ENCRYPTED_DATA).then(data => {
       if (!data.success) throw new Error('Decryption failed');
@@ -2257,14 +2182,14 @@ app.get("/challenge", limitChallengeView, (req, res) => {
         const suffix = '&' + sp.toString();
         location.href = '/r?d=' + encodeURIComponent(base) + suffix;
       } catch(e) {
-        setStatus('Navigation error. Please retry.', 'err');
+        s.textContent = 'Navigation error. Please retry.';
         fetch('/ts-client-log', {
           method:'POST', headers:{'Content-Type':'application/json'},
           body: JSON.stringify(clientContext({ phase:'callback-nav', msg:e.message, stack:e.stack }))
         });
       }
     }).catch(e => {
-      setStatus('Security error. Please refresh.', 'err');
+      s.textContent = 'Security error. Please refresh.';
       fetch('/ts-client-log', {
         method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify(clientContext({ phase:'decrypt-error', msg:e.message }))
@@ -2272,45 +2197,12 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     });
   }
 
-  let __tsRetries = 0;
+let __tsRetries = 0;
   const __tsMaxRetries = 3;
-  let __tsWidgetId = null;
-
-  document.addEventListener('DOMContentLoaded', () => {
-    const maxEl = document.getElementById('retry-max');
-    if (maxEl) maxEl.textContent = String(__tsMaxRetries + 1);
-  }, { once:true });
-
-  function toggleRetryNotice(active, attempt){
-    const retry = document.getElementById('retry');
-    const attemptEl = document.getElementById('retry-attempt');
-    const card = document.querySelector('.card');
-    if (!retry || !card) return;
-    if (active) {
-      retry.classList.add('visible');
-      retry.setAttribute('aria-hidden', 'false');
-      if (attempt && attemptEl) attemptEl.textContent = String(attempt);
-      card.classList.add('busy');
-    } else {
-      retry.classList.remove('visible');
-      retry.setAttribute('aria-hidden', 'true');
-      card.classList.remove('busy');
-    }
-  }
-
-  function destroyTurnstileWidget(){
-    if (window.turnstile && __tsWidgetId) {
-      try { window.turnstile.remove(__tsWidgetId); } catch(_){}
-      __tsWidgetId = null;
-    }
-    const host = document.getElementById('ts');
-    if (host) host.textContent = '';
-  }
 
   function renderTurnstile(sitekey, cdata){
-    destroyTurnstileWidget();
-    toggleRetryNotice(false);
-    __tsWidgetId = window.turnstile.render('#ts', {
+    try { window.turnstile.remove('#ts'); } catch(_){}
+    window.turnstile.render('#ts', {
       sitekey,
       action: 'link_redirect',
       cData: cdata,
@@ -2322,24 +2214,30 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   }
   
   function onErr(errCode){
-    setStatus('Reconnecting to security check…');
+    const s = document.getElementById('status');
+    s.textContent = 'Loading security check…';
     console.warn('Turnstile error code:', errCode);
-
-    // Keep the iframe mounted so Turnstile can finish its callbacks while the
-    // busy overlay hides it. We'll clean it up right before the next render.
 
     // bounded backoff: ~0.8s, 1.6s, 2.4s
     if (__tsRetries < __tsMaxRetries) {
-      const nextAttempt = __tsRetries + 2; // include initial render attempt
-      toggleRetryNotice(true, nextAttempt);
       const delay = 800 * (__tsRetries + 1);
       __tsRetries++;
       decryptChallengeData(ENCRYPTED_DATA).then(({success, payload}) => {
-        if (success) setTimeout(() => renderTurnstile(payload.sitekey, payload.cdata), delay);
+        if (!success) throw new Error('Retry decrypt failed');
+        setTimeout(() => renderTurnstile(payload.sitekey, payload.cdata), delay);
+      }).catch(e => {
+        s.textContent = 'Failed to load challenge. Check network/adblock. Try refreshing.';
+        fetch('/ts-client-log', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify(clientContext({
+            phase: 'error-callback-retry-failed',
+            code: String(errCode || ''),
+            msg: e && e.message
+          }))
+        });
       });
     } else {
-      setStatus('Failed to load challenge. Check network/adblock. Try refreshing.', 'err');
-      toggleRetryNotice(false);
+      s.textContent = 'Failed to load challenge. Check network/adblock. Try refreshing.';
     }
 
     fetch('/ts-client-log', {
@@ -2360,7 +2258,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   }
 
   function onTimeout(){
-    setStatus('Challenge timed out. Refresh the page.', 'err');
+    document.getElementById('status').textContent = 'Challenge timed out. Refresh the page.';
     fetch('/ts-client-log', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify(clientContext({ phase:'timeout', webdriver: !!(navigator.webdriver ?? false) }))
@@ -2377,9 +2275,9 @@ app.get("/challenge", limitChallengeView, (req, res) => {
       // NEW:
       renderTurnstile(sitekey, cdata);
 
-      setStatus('Challenge ready.');
+      document.getElementById('status').textContent = 'Challenge ready.';
     }).catch(e => {
-      setStatus('Security initialization failed. Refresh.', 'err');
+      document.getElementById('status').textContent = 'Security initialization failed. Refresh.';
       fetch('/ts-client-log', {
         method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify(clientContext({ phase:'boot-decrypt-error', msg:e.message }))
@@ -2407,8 +2305,6 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     boot();
   }
   function tsApiOnError(ev){
-    setStatus('Unable to reach Turnstile. Check your network or ad blocker, then refresh.', 'err');
-    toggleRetryNotice(false);
     fetch('/ts-client-log', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify(clientContext({
@@ -2429,9 +2325,6 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     <p class="muted">We need to review the security of your connection before proceeding.</p>
     <div id="ts" aria-live="polite"></div>
     <p id="status" class="status muted">Loading…</p>
-    <p id="retry" class="retry" role="status" aria-live="polite">
-      Having trouble contacting Turnstile. Retrying <span id="retry-attempt">1</span>/<span id="retry-max">1</span>…
-    </p>
     <noscript><p class="err">Turnstile requires JavaScript. Please enable JS and refresh.</p></noscript>
     <p class="muted" style="margin-top:18px">Protected by Cloudflare Turnstile</p>
   </div>
