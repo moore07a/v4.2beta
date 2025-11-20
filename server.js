@@ -2290,12 +2290,21 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   let __tsRetries = 0;
   const __tsMaxRetries = 3;
 
-  function renderTurnstile(sitekey, cdata){
-    try { window.turnstile.remove('#ts'); } catch(_){}
+  function renderTurnstile(sitekey, cdata) {
+  try { 
+    if (window.turnstile && typeof window.turnstile.remove === 'function') {
+      window.turnstile.remove('#ts'); 
+    }
+  } catch(_) {}
 
-    // Wait for API readiness before calling render; some clients fire onload
-    // before the widget is ready, which raises error 106010.
-    const doRender = () => window.turnstile.render('#ts', {
+  const doRender = () => {
+    if (!window.turnstile || typeof window.turnstile.render !== 'function') {
+      console.warn('Turnstile render not available yet');
+      setTimeout(() => renderTurnstile(sitekey, cdata), 100);
+      return;
+    }
+    
+    window.turnstile.render('#ts', {
       sitekey,
       action: 'link_redirect',
       cData: cdata,
@@ -2304,14 +2313,16 @@ app.get("/challenge", limitChallengeView, (req, res) => {
       'error-callback': onErr,
       'timeout-callback': onTimeout
     });
+  };
 
-    if (window.turnstile && typeof window.turnstile.ready === 'function') {
-      window.turnstile.ready(doRender);
-    } else {
-      // Fallback for older API shapes
-      doRender();
-    }
+  // Use ready() if available, otherwise render directly
+  if (window.turnstile && typeof window.turnstile.ready === 'function') {
+    window.turnstile.ready(doRender);
+  } else {
+    // If ready() isn't available, wait a bit more to ensure API is loaded
+    setTimeout(doRender, 100);
   }
+}
   
   function onErr(errCode){
     const s = document.getElementById('status');
@@ -2412,26 +2423,35 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     domReady.then(() => boot(attempt));
   }
 
-  function boot(attempt = 0){
-    const statusEl = document.getElementById('status');
-    statusEl.textContent = attempt ? 'Retrying security check…' : 'Loading security check…';
+  function boot(attempt = 0) {
+  const statusEl = document.getElementById('status');
+  statusEl.textContent = attempt ? 'Retrying security check…' : 'Loading security check…';
 
-    const resetCache = attempt > 0; // if we are retrying, allow a fresh fetch
-    const forceReloadScript = attempt > 0;
+  const resetCache = attempt > 0;
+  const forceReloadScript = attempt > 0;
 
-    ensureTurnstileScript({ forceReload: forceReloadScript })
-      .then(() => getChallengePayload(resetCache))
-      .then(data => {
-        if (!data.success) throw new Error(data.error || 'Decryption failed');
-        return data.payload;
-      })
-      .then(payload => waitForTurnstileReady(forceReloadScript ? 12000 : undefined).then((ready) => ({ payload, ready })))
-      .then(({ payload, ready }) => {
-        if (!ready) throw new Error('Turnstile script not ready');
-        renderTurnstile(payload.sitekey, payload.cdata);
-        statusEl.textContent = 'Challenge ready.';
-      })
-      .catch(e => {
+  ensureTurnstileScript({ forceReload: forceReloadScript })
+    .then(() => getChallengePayload(resetCache))
+    .then(data => {
+      if (!data.success) throw new Error(data.error || 'Decryption failed');
+      return data.payload;
+    })
+    .then(payload => {
+      // Add extra delay to ensure Turnstile is fully ready
+      return new Promise(resolve => {
+        setTimeout(() => {
+          waitForTurnstileReady(forceReloadScript ? 12000 : 5000).then((ready) => 
+            resolve({ payload, ready })
+          );
+        }, 300);
+      });
+    })
+    .then(({ payload, ready }) => {
+      if (!ready) throw new Error('Turnstile script not ready');
+      renderTurnstile(payload.sitekey, payload.cdata);
+      statusEl.textContent = 'Challenge ready.';
+    })
+    .catch(e => {
         const tooManyRetries = attempt >= 3;
         statusEl.textContent = tooManyRetries
           ? 'Security initialization failed. Check blockers and refresh.'
