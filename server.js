@@ -2179,15 +2179,26 @@ app.get("/challenge", limitChallengeView, (req, res) => {
 
   // Wait for the Turnstile API to be attached, with a bounded timeout so we do not fail
   // instantly when the script is slow or temporarily blocked. Resolve false instead of
-  // rejecting on timeout so callers can retry or reload the script.
+  // rejecting on timeout so callers can retry or reload the script. Additionally wait for
+  // the render function to exist so we do not call render before the widget is actually
+  // ready (which causes early error-callbacks like 106010 on some clients).
   function waitForTurnstileReady(maxWaitMs = 8000, intervalMs = 200) {
     return new Promise((resolve) => {
       const start = Date.now();
       const poll = () => {
         if (window.turnstile && typeof window.turnstile.ready === 'function') {
-          return window.turnstile.ready(() => resolve(true));
+          return window.turnstile.ready(() => {
+            if (typeof window.turnstile.render === 'function') return resolve(true);
+            // In rare cases ready fires before render attaches; keep polling briefly.
+            if (Date.now() - start > maxWaitMs) return resolve(false);
+            setTimeout(poll, intervalMs);
+          });
         }
-        if (window.turnstile) return resolve(true);
+
+        if (window.turnstile && typeof window.turnstile.render === 'function') {
+          return resolve(true);
+        }
+
         if (Date.now() - start > maxWaitMs) return resolve(false);
         setTimeout(poll, intervalMs);
       };
