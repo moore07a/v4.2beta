@@ -474,16 +474,6 @@ function addSpacer() {
   broadcastLog("", id);
 }
 
-  // Add this to prevent any other code from calling render
-  document.addEventListener('DOMContentLoaded', () => {
-    // Monitor for any direct render calls
-    setInterval(() => {
-      if (currentWidgetId && !document.querySelector('[id^="cf-chl-widget"]')) {
-        console.warn('⚠️ Widget ID exists but no DOM element found');
-      }
-    }, 1000);
-  });
-
   // Add this at the top of your JavaScript
   let renderCallCount = 0;
   const originalRender = window.turnstile?.render;
@@ -2154,6 +2144,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
 
   let currentWidgetId = null;
   let isRendering = false;
+  let renderCallCount = 0;
 
   window.__sid = (Math.random().toString(36).slice(2) + Date.now().toString(36));
   
@@ -2169,6 +2160,25 @@ app.get("/challenge", limitChallengeView, (req, res) => {
       ts: Date.now(),
       ...extra
     };
+  }
+
+  // Debugging: Track all render calls
+  function trackRenderCall(phase) {
+    const stack = new Error().stack;
+    const stackTrace = stack ? stack.split('\n').slice(2, 6).join(' | ') : 'no-stack';
+    
+    console.log(`🔍 ${phase} - Render call detected`, stackTrace);
+    
+    fetch('/ts-client-log', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(clientContext({
+        phase: phase,
+        renderCallCount: renderCallCount,
+        currentWidgetId: currentWidgetId,
+        isRendering: isRendering,
+        stackTrace: stackTrace
+      }))
+    });
   }
 
   window.addEventListener('error', (e) => {
@@ -2200,7 +2210,6 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     }).then(r => r.json());
   }
 
-  // Cache the decrypted payload
   const getChallengePayload = (() => {
     let cached = null;
     return (reset = false) => {
@@ -2212,7 +2221,19 @@ app.get("/challenge", limitChallengeView, (req, res) => {
 
   function ensureTurnstileScript() {
     return new Promise((resolve, reject) => {
-      if (window.turnstile) return resolve('already-loaded');
+      if (window.turnstile) {
+        // Patch the render function to track calls
+        if (window.turnstile.render && !window.turnstile.render._patched) {
+          const originalRender = window.turnstile.render;
+          window.turnstile.render = function(...args) {
+            renderCallCount++;
+            trackRenderCall(`render-call-${renderCallCount}`);
+            return originalRender.apply(this, args);
+          };
+          window.turnstile.render._patched = true;
+        }
+        return resolve('already-loaded');
+      }
 
       const existing = document.getElementById(TURNSTILE_SCRIPT_ID);
       if (existing) {
@@ -2231,6 +2252,20 @@ app.get("/challenge", limitChallengeView, (req, res) => {
       script.onload = () => {
         script.dataset.loaded = '1';
         script.dataset.loading = '';
+        
+        // Patch render function after script loads
+        setTimeout(() => {
+          if (window.turnstile?.render && !window.turnstile.render._patched) {
+            const originalRender = window.turnstile.render;
+            window.turnstile.render = function(...args) {
+              renderCallCount++;
+              trackRenderCall(`render-call-${renderCallCount}`);
+              return originalRender.apply(this, args);
+            };
+            window.turnstile.render._patched = true;
+          }
+        }, 100);
+        
         resolve('load');
       };
       script.onerror = () => {
@@ -2245,13 +2280,10 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   function onOK(token){
     const s = document.getElementById('status'); 
     s.textContent = 'Verifying…';
-    
-    // Clear the current widget since we're done with it
     currentWidgetId = null;
     
     getChallengePayload().then(data => {
       if (!data.success) throw new Error('Decryption failed');
-
       const { next, lh } = data.payload;
 
       try {
@@ -2284,26 +2316,13 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   let __tsRetries = 0;
   const __tsMaxRetries = 2;
 
-      function safeRenderTurnstile(sitekey, cdata) {
+  function safeRenderTurnstile(sitekey, cdata) {
+    trackRenderCall('safeRenderTurnstile-start');
+    
     return new Promise((resolve) => {
-      // Ultra-defensive check
       if (isRendering || currentWidgetId) {
-        console.warn('🚫 BLOCKED: Render in progress or widget already exists', {
-          isRendering, 
-          currentWidgetId,
-          stack: new Error().stack
-        });
-        
-        fetch('/ts-client-log', {
-          method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify(clientContext({
-            phase: 'render-blocked-duplicate',
-            isRendering: isRendering,
-            currentWidgetId: currentWidgetId,
-            stack: new Error().stack?.split('\n').slice(1, 4).join(' | ')
-          }))
-        });
-        
+        console.warn('🚫 BLOCKED: Render in progress or widget exists', { isRendering, currentWidgetId });
+        trackRenderCall('render-blocked-duplicate');
         resolve(null);
         return;
       }
@@ -2318,7 +2337,6 @@ app.get("/challenge", limitChallengeView, (req, res) => {
         return;
       }
 
-      // Nuclear option - complete reset
       tsContainer.innerHTML = '<div id="ts-inner" style="min-height:65px"></div>';
       const innerContainer = document.getElementById('ts-inner');
       
@@ -2329,7 +2347,6 @@ app.get("/challenge", limitChallengeView, (req, res) => {
         return;
       }
 
-      // Clear any existing widgets
       if (currentWidgetId && window.turnstile && typeof window.turnstile.remove === 'function') {
         try {
           window.turnstile.remove(currentWidgetId);
@@ -2339,7 +2356,6 @@ app.get("/challenge", limitChallengeView, (req, res) => {
       }
       currentWidgetId = null;
 
-      // Extended safety delay
       setTimeout(() => {
         if (!window.turnstile || typeof window.turnstile.render !== 'function') {
           console.error('❌ Turnstile API not available');
@@ -2350,6 +2366,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
 
         try {
           console.log('🎯 Attempting Turnstile render...');
+          trackRenderCall('before-render-attempt');
           const widgetId = window.turnstile.render(innerContainer, {
             sitekey,
             action: 'link_redirect',
@@ -2363,6 +2380,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
           if (widgetId) {
             currentWidgetId = widgetId;
             console.log('✅ Turnstile render SUCCESS, widget ID:', widgetId);
+            trackRenderCall('render-success');
             isRendering = false;
             resolve(widgetId);
           } else {
@@ -2375,44 +2393,23 @@ app.get("/challenge", limitChallengeView, (req, res) => {
           isRendering = false;
           resolve(null);
         }
-      }, 300); // Conservative delay
+      }, 300);
     });
   }
   
   function onErr(errCode){
     const s = document.getElementById('status');
     console.warn('Turnstile error code:', errCode);
+    trackRenderCall(`error-callback-${errCode}`);
 
-    // Clear current widget on error
     currentWidgetId = null;
     isRendering = false;
-
-    if (errCode === '106010') {
-      // Special handling for "already rendered" error
-      s.textContent = 'Resetting security check…';
-      
-      // Force cleanup and retry
-      const tsContainer = document.getElementById('ts');
-      if (tsContainer) {
-        tsContainer.innerHTML = '<div style="min-height:65px"></div>';
-      }
-      
-      if (window.turnstile && typeof window.turnstile.remove === 'function') {
-        try {
-          window.turnstile.remove('#ts');
-        } catch (e) {
-          // Ignore cleanup errors
-        }
-      }
-    } else {
-      s.textContent = 'Retrying security check…';
-    }
 
     if (__tsRetries < __tsMaxRetries) {
       const delay = 1000 * (__tsRetries + 1);
       __tsRetries++;
 
-      getChallengePayload(__tsRetries === 1) // Reset cache on first retry
+      getChallengePayload(__tsRetries === 1)
         .then(({success, payload}) => {
           if (!success) throw new Error('Retry decrypt failed');
           
@@ -2422,15 +2419,6 @@ app.get("/challenge", limitChallengeView, (req, res) => {
         })
         .catch(err => {
           s.textContent = 'Security check failed. Please refresh.';
-          fetch('/ts-client-log', {
-            method:'POST', headers:{'Content-Type':'application/json'},
-            body: JSON.stringify(clientContext({
-              phase:'error-retry-decrypt',
-              msg: err?.message || String(err),
-              code: String(errCode || ''),
-              retryCount: __tsRetries
-            }))
-          });
         });
     } else {
       s.textContent = 'Too many attempts. Please refresh the page.';
@@ -2443,6 +2431,8 @@ app.get("/challenge", limitChallengeView, (req, res) => {
         sid: window.__sid,
         code: String(errCode || ''),
         retryCount: __tsRetries,
+        renderCallCount: renderCallCount,
+        currentWidgetId: currentWidgetId,
         webdriver: !!(navigator.webdriver ?? false)
       }))
     });
@@ -2450,7 +2440,6 @@ app.get("/challenge", limitChallengeView, (req, res) => {
 
   function onTimeout(){
     document.getElementById('status').textContent = 'Challenge timed out. Refresh the page.';
-    // Clear widget on timeout
     currentWidgetId = null;
     isRendering = false;
     
@@ -2460,7 +2449,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     });
   }
 
-    function startBoot() {
+  function startBoot() {
     const domReady = new Promise((resolve) => {
       if (document.readyState === 'complete' || document.readyState === 'interactive') {
         resolve();
@@ -2473,7 +2462,6 @@ app.get("/challenge", limitChallengeView, (req, res) => {
       const statusEl = document.getElementById('status');
       statusEl.textContent = 'Loading security check…';
 
-      // Step 1: Ensure script is loaded
       ensureTurnstileScript()
         .then(() => getChallengePayload())
         .then(data => {
@@ -2481,7 +2469,6 @@ app.get("/challenge", limitChallengeView, (req, res) => {
           return data.payload;
         })
         .then(payload => {
-          // Step 2: Wait for explicit "fully loaded" signal
           return new Promise((resolve) => {
             const checkTurnstileReady = () => {
               if (window.turnstile && 
@@ -2489,13 +2476,11 @@ app.get("/challenge", limitChallengeView, (req, res) => {
                   typeof window.turnstile.ready === 'function' &&
                   typeof window.turnstile.remove === 'function') {
                 
-                // Double-check with ready callback
                 window.turnstile.ready(() => {
-                  // Additional verification that render actually works
                   setTimeout(() => {
                     console.log('Turnstile fully confirmed ready');
                     resolve(payload);
-                  }, 500); // Extra conservative delay
+                  }, 500);
                 });
                 
               } else {
@@ -2505,7 +2490,6 @@ app.get("/challenge", limitChallengeView, (req, res) => {
             
             checkTurnstileReady();
             
-            // Safety timeout
             setTimeout(() => {
               console.warn('Turnstile readiness timeout, proceeding anyway');
               resolve(payload);
@@ -2513,7 +2497,6 @@ app.get("/challenge", limitChallengeView, (req, res) => {
           });
         })
         .then(payload => {
-          // Step 3: Render with maximum safety
           return safeRenderTurnstile(payload.sitekey, payload.cdata);
         })
         .then((widgetId) => {
@@ -2521,13 +2504,13 @@ app.get("/challenge", limitChallengeView, (req, res) => {
             statusEl.textContent = 'Challenge ready.';
             console.log('✅ Turnstile rendered successfully on first attempt');
             
-            // Log success to server
             fetch('/ts-client-log', {
               method:'POST', headers:{'Content-Type':'application/json'},
               body: JSON.stringify(clientContext({
                 phase: 'render-success-first-attempt',
                 sid: window.__sid,
-                widgetId: widgetId
+                widgetId: widgetId,
+                renderCallCount: renderCallCount
               }))
             });
           } else {
@@ -2537,13 +2520,6 @@ app.get("/challenge", limitChallengeView, (req, res) => {
         .catch(e => {
           statusEl.textContent = 'Security initialization failed. Please refresh.';
           console.error('Boot failed:', e);
-          fetch('/ts-client-log', {
-            method:'POST', headers:{'Content-Type':'application/json'},
-            body: JSON.stringify(clientContext({
-              phase: 'boot-failed',
-              msg: e?.message || String(e)
-            }))
-          });
         });
     });
   }
@@ -2564,7 +2540,6 @@ app.get("/challenge", limitChallengeView, (req, res) => {
       }))
     });
 
-    // Start the boot process
     startBoot();
   }
 
