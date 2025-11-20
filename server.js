@@ -2207,12 +2207,22 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   }
 
   // Ensure the Turnstile script is present (re-load if an ad blocker removed it)
-  function ensureTurnstileScript() {
+  function ensureTurnstileScript(options = {}) {
+    const { forceReload = false } = options || {};
+
     return new Promise((resolve, reject) => {
-      if (window.turnstile) return resolve('already-loaded');
+      if (forceReload && window.turnstile) {
+        try { delete window.turnstile; } catch (_) {}
+      }
+
+      if (window.turnstile && !forceReload) return resolve('already-loaded');
 
       const existing = document.getElementById(TURNSTILE_SCRIPT_ID);
       if (existing) {
+        if (forceReload) {
+          existing.remove();
+          return ensureTurnstileScript({ forceReload: false }).then(resolve).catch(reject);
+        }
         if (existing.dataset.failed === '1') {
           existing.remove();
           return ensureTurnstileScript().then(resolve).catch(reject);
@@ -2226,12 +2236,17 @@ app.get("/challenge", limitChallengeView, (req, res) => {
       const script = document.createElement('script');
       script.id = TURNSTILE_SCRIPT_ID;
       script.src = TURNSTILE_SCRIPT_SRC;
+      script.async = true;
+      script.defer = true;
+      script.dataset.loading = '1';
       script.onload = () => {
         script.dataset.loaded = '1';
+        script.dataset.loading = '';
         resolve('load');
       };
       script.onerror = () => {
         script.dataset.failed = '1';
+        script.dataset.loading = '';
         reject(new Error('Turnstile script failed to load'));
       };
       document.head.appendChild(script);
@@ -2311,11 +2326,14 @@ app.get("/challenge", limitChallengeView, (req, res) => {
       // potentially stale payload that triggered the initial error.
       const shouldResetPayload = __tsRetries === 1;
 
-      const rerenderSafely = (payload) => {
+      const rerenderSafely = (payload, forceReload = false) => {
         // Ensure the API is truly ready before attempting another render; error code
         // 106010 can surface when render is called too early on some clients.
-        return ensureTurnstileScript()
-          .then(() => waitForTurnstileReady())
+        const reloadScript = forceReload || String(errCode || '') === '106010';
+        const maxWait = reloadScript ? 12000 : undefined;
+
+        return ensureTurnstileScript({ forceReload: reloadScript })
+          .then(() => waitForTurnstileReady(maxWait))
           .then((ready) => {
             if (!ready) throw new Error('Turnstile API not ready for retry');
             renderTurnstile(payload.sitekey, payload.cdata);
@@ -2325,7 +2343,8 @@ app.get("/challenge", limitChallengeView, (req, res) => {
       getChallengePayload(shouldResetPayload)
         .then(({success, payload}) => {
           if (!success) throw new Error('Retry decrypt failed');
-          setTimeout(() => rerenderSafely(payload).catch((err) => {
+          const forceReload = __tsRetries > 1 || String(errCode || '') === '106010';
+          setTimeout(() => rerenderSafely(payload, forceReload).catch((err) => {
             s.textContent = 'Security check failed. Please refresh.';
             fetch('/ts-client-log', {
               method:'POST', headers:{'Content-Type':'application/json'},
@@ -2398,14 +2417,15 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     statusEl.textContent = attempt ? 'Retrying security check…' : 'Loading security check…';
 
     const resetCache = attempt > 0; // if we are retrying, allow a fresh fetch
+    const forceReloadScript = attempt > 0;
 
-    ensureTurnstileScript()
+    ensureTurnstileScript({ forceReload: forceReloadScript })
       .then(() => getChallengePayload(resetCache))
       .then(data => {
         if (!data.success) throw new Error(data.error || 'Decryption failed');
         return data.payload;
       })
-      .then(payload => waitForTurnstileReady().then((ready) => ({ payload, ready })))
+      .then(payload => waitForTurnstileReady(forceReloadScript ? 12000 : undefined).then((ready) => ({ payload, ready })))
       .then(({ payload, ready }) => {
         if (!ready) throw new Error('Turnstile script not ready');
         renderTurnstile(payload.sitekey, payload.cdata);
