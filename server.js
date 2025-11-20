@@ -2110,9 +2110,14 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   }
   h2{ margin:0 0 10px; font-size:clamp(26px,3.4vw,38px); letter-spacing:.2px; }
   .muted{ color:var(--muted); }
-  #ts{ display:inline-block; margin-top:12px; }
+  #ts{ display:inline-block; margin-top:12px; min-height:65px; }
   .status{ margin-top:12px; color:var(--muted); font-size:14px; min-height:20px; }
   .err{ color:#ef4444; }
+  .retry-btn{ 
+    margin-top:12px; padding:8px 16px; background:var(--accent); color:white; 
+    border:none; border-radius:6px; cursor:pointer; font-size:14px;
+  }
+  .retry-btn:disabled{ opacity:0.6; cursor:not-allowed; }
 </style>
 
 <script>
@@ -2120,9 +2125,12 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   const TURNSTILE_SCRIPT_SRC = "${TURNSTILE_ORIGIN}/turnstile/v0/api.js?render=explicit";
   const TURNSTILE_SCRIPT_ID = "cf-turnstile-script";
 
-  // FIX: Track widget state to prevent duplicates
+  // Widget state management
   let widgetRendered = false;
   let currentWidgetId = null;
+  let bootStarted = false;
+  let __tsRetries = 0;
+  const __tsMaxRetries = 2;
   window.__sid = (Math.random().toString(36).slice(2) + Date.now().toString(36));
   
   function clientContext(extra = {}) {
@@ -2139,6 +2147,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     };
   }
 
+  // Error logging
   window.addEventListener('error', (e) => {
     fetch('/ts-client-log', {
       method:'POST', headers:{'Content-Type':'application/json'},
@@ -2199,14 +2208,12 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     });
   }
 
-  // FIX: Improved script loading with better state management
   function ensureTurnstileScript(options = {}) {
     const { forceReload = false } = options || {};
 
     return new Promise((resolve, reject) => {
       if (forceReload && window.turnstile) {
         try { 
-          // Clean up any existing widget before reloading
           if (typeof window.turnstile.remove === 'function' && currentWidgetId) {
             window.turnstile.remove(currentWidgetId);
             currentWidgetId = null;
@@ -2257,7 +2264,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     const s = document.getElementById('status'); 
     s.textContent = 'Verifying…';
     
-    // FIX: Prevent multiple submissions
+    // Prevent multiple submissions
     if (window.submissionInProgress) return;
     window.submissionInProgress = true;
 
@@ -2295,31 +2302,31 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     });
   }
 
-  let __tsRetries = 0;
-  const __tsMaxRetries = 2; // FIX: Reduced retries to prevent duplicates
-
-  // FIX: Improved render function with proper cleanup
-  function renderTurnstile(sitekey, cdata) {
-    // Always remove any existing widget first
+  function cleanupWidget() {
     if (window.turnstile && typeof window.turnstile.remove === 'function' && currentWidgetId) {
       try {
         window.turnstile.remove(currentWidgetId);
       } catch (e) {
-        console.warn('Failed to remove previous widget:', e);
+        console.warn('Failed to remove widget:', e);
       }
       currentWidgetId = null;
     }
-
-    // Clear the container
+    widgetRendered = false;
+    
     const container = document.getElementById('ts');
     if (container) {
       container.innerHTML = '';
     }
+  }
+
+  function renderTurnstile(sitekey, cdata) {
+    // Always cleanup existing widget first
+    cleanupWidget();
 
     // Prevent multiple renders
     if (widgetRendered) {
       console.warn('Widget already rendered, skipping duplicate');
-      return;
+      return null;
     }
 
     try {
@@ -2348,9 +2355,8 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     s.textContent = 'Retrying security check…';
     console.warn('Turnstile error code:', errCode);
 
-    // Reset widget state for retry
-    widgetRendered = false;
-    currentWidgetId = null;
+    // Cleanup for retry
+    cleanupWidget();
 
     if (__tsRetries < __tsMaxRetries) {
       const delay = 400 * (__tsRetries + 1);
@@ -2395,6 +2401,15 @@ app.get("/challenge", limitChallengeView, (req, res) => {
         });
     } else {
       s.textContent = 'Failed to load challenge. Please refresh the page.';
+      // Show manual retry button
+      const retryBtn = document.createElement('button');
+      retryBtn.className = 'retry-btn';
+      retryBtn.textContent = 'Retry Challenge';
+      retryBtn.onclick = function() {
+        this.disabled = true;
+        location.reload();
+      };
+      s.appendChild(retryBtn);
     }
 
     fetch('/ts-client-log', {
@@ -2409,15 +2424,24 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   }
 
   function onTimeout(){
-    document.getElementById('status').textContent = 'Challenge timed out. Refresh the page.';
+    const s = document.getElementById('status');
+    s.textContent = 'Challenge timed out. Refresh the page.';
+    
+    // Show retry button
+    const retryBtn = document.createElement('button');
+    retryBtn.className = 'retry-btn';
+    retryBtn.textContent = 'Retry Challenge';
+    retryBtn.onclick = function() {
+      this.disabled = true;
+      location.reload();
+    };
+    s.appendChild(retryBtn);
+    
     fetch('/ts-client-log', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify(clientContext({ phase:'timeout' }))
     });
   }
-
-  // FIX: Simplified boot process with better state management
-  let bootStarted = false;
 
   function startBoot(attempt = 0) {
     if (bootStarted && attempt === 0) return;
@@ -2448,8 +2472,27 @@ app.get("/challenge", limitChallengeView, (req, res) => {
           ? 'Security initialization failed. Please refresh.'
           : 'Security initialization hiccup… retrying.';
 
+        fetch('/ts-client-log', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify(clientContext({
+            phase: tooManyRetries ? 'boot-failed' : 'boot-retry',
+            msg: e?.message || String(e),
+            attempt
+          }))
+        });
+
         if (!tooManyRetries) {
           setTimeout(() => startBoot(attempt + 1), 500 * (attempt + 1));
+        } else {
+          // Show manual retry button after final failure
+          const retryBtn = document.createElement('button');
+          retryBtn.className = 'retry-btn';
+          retryBtn.textContent = 'Retry Challenge';
+          retryBtn.onclick = function() {
+            this.disabled = true;
+            location.reload();
+          };
+          statusEl.appendChild(retryBtn);
         }
       });
   }
@@ -2460,22 +2503,56 @@ app.get("/challenge", limitChallengeView, (req, res) => {
       scriptEl.dataset.loaded = '1'; 
       scriptEl.dataset.failed = ''; 
     }
-    startBoot();
+    
+    // Small delay to ensure API is fully ready
+    setTimeout(() => {
+      if (!bootStarted) startBoot();
+    }, 100);
   }
 
   function tsApiOnError(ev){
-    document.getElementById('status').textContent = 'Challenge script failed to load. Please refresh.';
+    const statusEl = document.getElementById('status');
+    statusEl.textContent = 'Challenge script failed to load. Please refresh.';
+    
     const scriptEl = document.getElementById(TURNSTILE_SCRIPT_ID);
     if (scriptEl) scriptEl.dataset.failed = '1';
+    
+    // Show retry button
+    const retryBtn = document.createElement('button');
+    retryBtn.className = 'retry-btn';
+    retryBtn.textContent = 'Retry Challenge';
+    retryBtn.onclick = function() {
+      this.disabled = true;
+      location.reload();
+    };
+    statusEl.appendChild(retryBtn);
+    
+    fetch('/ts-client-log', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(clientContext({
+        phase:'api-onerror',
+        src: ev && ev.target && ev.target.src || ''
+      }))
+    });
   }
 
-  // Start the boot process when DOM is ready
+  // Initialize when DOM is ready
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', () => {
-      if (!bootStarted) startBoot();
+      if (!bootStarted) {
+        // If script hasn't loaded in 2 seconds, start boot anyway
+        setTimeout(() => {
+          if (!bootStarted && !document.getElementById(TURNSTILE_SCRIPT_ID)?.dataset.loaded) {
+            startBoot();
+          }
+        }, 2000);
+      }
     });
   } else {
-    if (!bootStarted) startBoot();
+    // DOM already ready, start boot if not already started
+    setTimeout(() => {
+      if (!bootStarted) startBoot();
+    }, 100);
   }
 </script>
 
