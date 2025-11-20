@@ -2162,12 +2162,12 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     };
   }
 
-  // Debugging: Track all render calls
+  // Track all render calls
   function trackRenderCall(phase) {
     const stack = new Error().stack;
     const stackTrace = stack ? stack.split('\n').slice(2, 6).join(' | ') : 'no-stack';
     
-    console.log(`🔍 ${phase} - Render call detected`, stackTrace);
+    console.log('Render call detected - Phase:', phase, 'Stack:', stackTrace);
     
     fetch('/ts-client-log', {
       method:'POST', headers:{'Content-Type':'application/json'},
@@ -2227,7 +2227,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
           const originalRender = window.turnstile.render;
           window.turnstile.render = function(...args) {
             renderCallCount++;
-            trackRenderCall(`render-call-${renderCallCount}`);
+            trackRenderCall('render-call-' + renderCallCount);
             return originalRender.apply(this, args);
           };
           window.turnstile.render._patched = true;
@@ -2255,11 +2255,11 @@ app.get("/challenge", limitChallengeView, (req, res) => {
         
         // Patch render function after script loads
         setTimeout(() => {
-          if (window.turnstile?.render && !window.turnstile.render._patched) {
+          if (window.turnstile && window.turnstile.render && !window.turnstile.render._patched) {
             const originalRender = window.turnstile.render;
             window.turnstile.render = function(...args) {
               renderCallCount++;
-              trackRenderCall(`render-call-${renderCallCount}`);
+              trackRenderCall('render-call-' + renderCallCount);
               return originalRender.apply(this, args);
             };
             window.turnstile.render._patched = true;
@@ -2279,7 +2279,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
 
   function onOK(token){
     const s = document.getElementById('status'); 
-    s.textContent = 'Verifying…';
+    s.textContent = 'Verifying...';
     currentWidgetId = null;
     
     getChallengePayload().then(data => {
@@ -2321,7 +2321,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     
     return new Promise((resolve) => {
       if (isRendering || currentWidgetId) {
-        console.warn('🚫 BLOCKED: Render in progress or widget exists', { isRendering, currentWidgetId });
+        console.warn('BLOCKED: Render in progress or widget exists', { isRendering, currentWidgetId });
         trackRenderCall('render-blocked-duplicate');
         resolve(null);
         return;
@@ -2331,7 +2331,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
       
       const tsContainer = document.getElementById('ts');
       if (!tsContainer) {
-        console.error('❌ Turnstile container not found');
+        console.error('Turnstile container not found');
         isRendering = false;
         resolve(null);
         return;
@@ -2341,7 +2341,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
       const innerContainer = document.getElementById('ts-inner');
       
       if (!innerContainer) {
-        console.error('❌ Inner container creation failed');
+        console.error('Inner container creation failed');
         isRendering = false;
         resolve(null);
         return;
@@ -2351,21 +2351,21 @@ app.get("/challenge", limitChallengeView, (req, res) => {
         try {
           window.turnstile.remove(currentWidgetId);
         } catch (e) {
-          console.warn('⚠️ During widget removal:', e);
+          console.warn('During widget removal:', e);
         }
       }
       currentWidgetId = null;
 
       setTimeout(() => {
         if (!window.turnstile || typeof window.turnstile.render !== 'function') {
-          console.error('❌ Turnstile API not available');
+          console.error('Turnstile API not available');
           isRendering = false;
           resolve(null);
           return;
         }
 
         try {
-          console.log('🎯 Attempting Turnstile render...');
+          console.log('Attempting Turnstile render...');
           trackRenderCall('before-render-attempt');
           const widgetId = window.turnstile.render(innerContainer, {
             sitekey,
@@ -2379,17 +2379,17 @@ app.get("/challenge", limitChallengeView, (req, res) => {
           
           if (widgetId) {
             currentWidgetId = widgetId;
-            console.log('✅ Turnstile render SUCCESS, widget ID:', widgetId);
+            console.log('Turnstile render SUCCESS, widget ID:', widgetId);
             trackRenderCall('render-success');
             isRendering = false;
             resolve(widgetId);
           } else {
-            console.error('❌ Turnstile render returned null widget ID');
+            console.error('Turnstile render returned null widget ID');
             isRendering = false;
             resolve(null);
           }
         } catch (renderError) {
-          console.error('💥 Turnstile render exception:', renderError);
+          console.error('Turnstile render exception:', renderError);
           isRendering = false;
           resolve(null);
         }
@@ -2400,7 +2400,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   function onErr(errCode){
     const s = document.getElementById('status');
     console.warn('Turnstile error code:', errCode);
-    trackRenderCall(`error-callback-${errCode}`);
+    trackRenderCall('error-callback-' + errCode);
 
     currentWidgetId = null;
     isRendering = false;
@@ -2460,7 +2460,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
 
     domReady.then(() => {
       const statusEl = document.getElementById('status');
-      statusEl.textContent = 'Loading security check…';
+      statusEl.textContent = 'Loading security check...';
 
       ensureTurnstileScript()
         .then(() => getChallengePayload())
@@ -2502,7 +2502,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
         .then((widgetId) => {
           if (widgetId) {
             statusEl.textContent = 'Challenge ready.';
-            console.log('✅ Turnstile rendered successfully on first attempt');
+            console.log('Turnstile rendered successfully on first attempt');
             
             fetch('/ts-client-log', {
               method:'POST', headers:{'Content-Type':'application/json'},
