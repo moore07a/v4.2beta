@@ -2341,6 +2341,14 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     });
   }
 
+  let bootStarted = false;
+
+  function startBoot(attempt = 0) {
+    if (bootStarted && attempt === 0) return;
+    bootStarted = true;
+    boot(attempt);
+  }
+
   function boot(attempt = 0){
     const statusEl = document.getElementById('status');
     statusEl.textContent = attempt ? 'Retrying security check…' : 'Loading security check…';
@@ -2401,7 +2409,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
          dpr: window.devicePixelRatio ?? null }
 }))
     });
-    boot();
+    startBoot();
   }
   function tsApiOnError(ev){
     document.getElementById('status').textContent = 'Challenge script failed to load. Check adblock and refresh.';
@@ -2415,6 +2423,37 @@ app.get("/challenge", limitChallengeView, (req, res) => {
       }))
     });
   }
+
+  // If the Turnstile script is blocked (ad blocker, network drop), the onload
+  // handler above will never fire, leaving the page stuck on "Loading…".
+  // Attempt a self-healing load after a brief delay and kick off boot once the
+  // API becomes available.
+  document.addEventListener('DOMContentLoaded', () => {
+    setTimeout(() => {
+      if (bootStarted || window.turnstile) return;
+      const statusEl = document.getElementById('status');
+      if (statusEl) {
+        statusEl.textContent = 'Still loading security check… attempting recovery.';
+      }
+
+      ensureTurnstileScript()
+        .then(() => waitForTurnstileReady())
+        .then((ready) => {
+          if (!ready) throw new Error('Turnstile API not ready after retry');
+          startBoot();
+        })
+        .catch((err) => {
+          const message = err?.message || String(err);
+          if (statusEl) {
+            statusEl.textContent = 'Challenge script failed to load. Check adblock and refresh.';
+          }
+          fetch('/ts-client-log', {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify(clientContext({ phase:'fallback-script-retry', msg: message }))
+          });
+        });
+    }, 1500);
+  });
 </script>
 
 <script id="cf-turnstile-script" src="${TURNSTILE_ORIGIN}/turnstile/v0/api.js?render=explicit"
