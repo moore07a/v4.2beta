@@ -2307,7 +2307,10 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     if (__tsRetries < __tsMaxRetries) {
       const delay = 400 * (__tsRetries + 1);
       __tsRetries++;
-      getChallengePayload()
+      // Force a fresh decrypt on the first retry so we do not reuse a
+      // potentially stale payload that triggered the initial error.
+      const shouldResetPayload = __tsRetries === 1;
+      getChallengePayload(shouldResetPayload)
         .then(({success, payload}) => {
           if (!success) throw new Error('Retry decrypt failed');
           setTimeout(() => renderTurnstile(payload.sitekey, payload.cdata), delay);
