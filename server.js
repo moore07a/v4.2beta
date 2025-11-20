@@ -2121,8 +2121,8 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   const TURNSTILE_SCRIPT_SRC = "${TURNSTILE_ORIGIN}/turnstile/v0/api.js?render=explicit";
   const TURNSTILE_SCRIPT_ID = "cf-turnstile-script";
 
-  let currentWidgetId = null; // Track the current widget ID
-  let isRendering = false; // Prevent concurrent renders
+  let currentWidgetId = null;
+  let isRendering = false;
 
   window.__sid = (Math.random().toString(36).slice(2) + Date.now().toString(36));
   
@@ -2140,7 +2140,44 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     };
   }
 
-  // [Keep all your existing event listeners and helper functions...]
+  window.addEventListener('error', (e) => {
+    fetch('/ts-client-log', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(clientContext({
+        phase:'window-error',
+        filename: e.filename, lineno: e.lineno, colno: e.colno,
+        message: String(e.message||'')
+      }))
+    });
+  }, true);
+
+  window.addEventListener('unhandledrejection', (e) => {
+    fetch('/ts-client-log', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(clientContext({
+        phase:'unhandledrejection',
+        reason: String(e.reason && (e.reason.stack||e.reason.message||e.reason) || '')
+      }))
+    });
+  });
+
+  function decryptChallengeData(encrypted) {
+    return fetch('/decrypt-challenge-data', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ data: encrypted })
+    }).then(r => r.json());
+  }
+
+  // Cache the decrypted payload
+  const getChallengePayload = (() => {
+    let cached = null;
+    return (reset = false) => {
+      if (reset) cached = null;
+      if (!cached) cached = decryptChallengeData(ENCRYPTED_DATA);
+      return cached;
+    };
+  })();
 
   function ensureTurnstileScript() {
     return new Promise((resolve, reject) => {
