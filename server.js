@@ -2211,7 +2211,10 @@ let __tsRetries = 0;
 
   function renderTurnstile(sitekey, cdata){
     try { window.turnstile.remove('#ts'); } catch(_){}
-    window.turnstile.render('#ts', {
+
+    // Wait for API readiness before calling render; some clients fire onload
+    // before the widget is ready, which raises error 106010.
+    const doRender = () => window.turnstile.render('#ts', {
       sitekey,
       action: 'link_redirect',
       cData: cdata,
@@ -2220,6 +2223,13 @@ let __tsRetries = 0;
       'error-callback': onErr,
       'timeout-callback': onTimeout
     });
+
+    if (window.turnstile && typeof window.turnstile.ready === 'function') {
+      window.turnstile.ready(doRender);
+    } else {
+      // Fallback for older API shapes
+      doRender();
+    }
   }
   
   function onErr(errCode){
