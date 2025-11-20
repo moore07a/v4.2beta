@@ -2094,6 +2094,8 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   :root{
     --bg:#0c1116; --card:#0c1116; --text:#e8eef6; --muted:#93a1b2;
     --accent:#0ea5e9; --ring:rgba(255,255,255,0.05); --border:rgba(255,255,255,0.06);
+    --overlay:rgba(12,17,22,0.9);
+    --overlay-light:rgba(255,255,255,0.85);
     --ts-height:82px; --retry-height:20px;
   }
   @media (prefers-color-scheme: light){
@@ -2136,6 +2138,20 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     50%{ opacity:0.35; }
     100%{ opacity:0.15; }
   }
+  .card.busy::after{
+    content:"";
+    position:absolute;
+    inset:0;
+    border-radius:inherit;
+    background:var(--overlay);
+    backdrop-filter:blur(2px);
+    opacity:1;
+  }
+  @media (prefers-color-scheme: light){
+    .card.busy::after{ background:var(--overlay-light); }
+  }
+  .card.busy #ts{ visibility:hidden; }
+  .card.busy #ts iframe{ visibility:hidden; }
   h2{ margin:0 0 10px; font-size:clamp(26px,3.4vw,38px); letter-spacing:.2px; }
   .muted{ color:var(--muted); }
   #ts{
