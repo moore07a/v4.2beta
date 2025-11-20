@@ -2127,22 +2127,6 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     position:absolute;
     inset:0;
     border-radius:inherit;
-    background:rgba(12,17,22,0.85);
-    backdrop-filter:blur(2px);
-    animation: pulse 1.2s ease-in-out infinite;
-  }
-  .card.busy #ts{ visibility:hidden; }
-  .card.busy #ts iframe{ visibility:hidden; }
-  @keyframes pulse{
-    0%{ opacity:0.15; }
-    50%{ opacity:0.35; }
-    100%{ opacity:0.15; }
-  }
-  .card.busy::after{
-    content:"";
-    position:absolute;
-    inset:0;
-    border-radius:inherit;
     background:var(--overlay);
     backdrop-filter:blur(2px);
     opacity:1;
@@ -2160,15 +2144,17 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     justify-content:center;
     margin-top:12px;
     min-height:var(--ts-height);
+    background:var(--card);
+    border-radius:8px;
   }
   #ts:empty::before{
     content:"";
     display:block;
     width:100%;
     height:var(--ts-height);
-    border-radius:6px;
-    background:rgba(255,255,255,0.02);
-    border:1px dashed rgba(255,255,255,0.08);
+    border-radius:inherit;
+    background:transparent;
+    border:1px dashed var(--border);
   }
   #ts iframe{ min-height:var(--ts-height); }
   .status{
@@ -2328,7 +2314,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   
   function onErr(errCode){
     const s = document.getElementById('status');
-    s.textContent = 'Security check, please wait…';
+    s.textContent = 'Reconnecting to security check…';
     console.warn('Turnstile error code:', errCode);
 
     // Keep the iframe mounted so Turnstile can finish its callbacks while the
