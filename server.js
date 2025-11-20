@@ -2181,14 +2181,20 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   // Wait for the Turnstile API to be attached, with a bounded timeout so we do not fail
   // instantly when the script is slow or temporarily blocked. Resolve false instead of
   // rejecting on timeout so callers can retry or reload the script.
-  function waitForTurnstileReady(maxWaitMs = 8000) {
+    function waitForTurnstileReady(maxWaitMs = 8000) {
     return new Promise((resolve) => {
       const start = Date.now();
       
       function check() {
-        // Check if both turnstile object exists AND render function is available
-        if (window.turnstile && typeof window.turnstile.render === 'function') {
-          resolve(true);
+        // More thorough check - ensure multiple Turnstile methods are available
+        const isFullyReady = window.turnstile && 
+                            typeof window.turnstile.render === 'function' &&
+                            typeof window.turnstile.ready === 'function' &&
+                            typeof window.turnstile.remove === 'function';
+        
+        if (isFullyReady) {
+          // Additional safety check - wait a bit more even if it seems ready
+          setTimeout(() => resolve(true), 100);
           return;
         }
         
@@ -2197,7 +2203,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
           return;
         }
         
-        setTimeout(check, 100);
+        setTimeout(check, 150); // Slightly longer interval
       }
       
       check();
@@ -2449,19 +2455,23 @@ app.get("/challenge", limitChallengeView, (req, res) => {
         return data.payload;
       })
       .then(payload => {
-        // Add extra delay to ensure Turnstile is fully ready
+        // More conservative delay - wait longer before attempting render
         return new Promise(resolve => {
           setTimeout(() => {
-            waitForTurnstileReady(forceReloadScript ? 12000 : 5000).then((ready) => 
+            waitForTurnstileReady(forceReloadScript ? 15000 : 8000).then((ready) => 
               resolve({ payload, ready })
             );
-          }, 300);
+          }, 800); // Increased from 300ms to 800ms
         });
       })
       .then(({ payload, ready }) => {
         if (!ready) throw new Error('Turnstile script not ready');
-        renderTurnstile(payload.sitekey, payload.cdata);
-        statusEl.textContent = 'Challenge ready.';
+        
+        // Additional safety delay before actual render
+        setTimeout(() => {
+          renderTurnstile(payload.sitekey, payload.cdata);
+          statusEl.textContent = 'Challenge ready.';
+        }, 200);
       })
       .catch(e => {
         const tooManyRetries = attempt >= 3;
@@ -2485,37 +2495,40 @@ app.get("/challenge", limitChallengeView, (req, res) => {
       });
   }
 
-  function tsApiOnLoad(ev){
+    function tsApiOnLoad(ev){
     const scriptEl = document.getElementById(TURNSTILE_SCRIPT_ID);
     if (scriptEl) { 
       scriptEl.dataset.loaded = '1'; 
       scriptEl.dataset.failed = ''; 
     }
 
-    // Don't start boot immediately - wait for API to be fully ready
-    waitForTurnstileReady(5000).then((ready) => {
-      if (ready) {
-        fetch('/ts-client-log', {
-          method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify(clientContext({
-            phase: 'api-onload-ready',
-            sid: window.__sid,
-            webdriver: !!(navigator.webdriver ?? false),
-          }))
-        });
-        startBoot();
-      } else {
-        // If not ready after 5 seconds, start boot anyway (it will retry)
-        fetch('/ts-client-log', {
-          method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify(clientContext({
-            phase: 'api-onload-not-ready',
-            sid: window.__sid,
-          }))
-        });
-        startBoot();
-      }
-    });
+    // More conservative approach - wait longer even if API reports ready
+    // This ensures Turnstile is COMPLETELY ready before attempting render
+    setTimeout(() => {
+      waitForTurnstileReady(3000).then((ready) => {
+        if (ready) {
+          fetch('/ts-client-log', {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify(clientContext({
+              phase: 'api-onload-ready-delayed',
+              sid: window.__sid,
+              webdriver: !!(navigator.webdriver ?? false),
+            }))
+          });
+          startBoot();
+        } else {
+          // If not ready after additional delay, start boot anyway (it will retry)
+          fetch('/ts-client-log', {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify(clientContext({
+              phase: 'api-onload-not-ready-delayed',
+              sid: window.__sid,
+            }))
+          });
+          startBoot();
+        }
+      });
+    }, 1000); // Additional 1 second delay even after API reports ready
 
     fetch('/ts-client-log', {
       method:'POST', headers:{'Content-Type':'application/json'},
