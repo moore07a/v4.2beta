@@ -2117,28 +2117,6 @@ app.get("/challenge", limitChallengeView, (req, res) => {
 
 <script>
   const ENCRYPTED_DATA = ${JSON.stringify(encryptedData)};
-  const TURNSTILE_SRC = "${TURNSTILE_ORIGIN}/turnstile/v0/api.js";
-
-  let __loadingScript = false;
-  function loadTurnstileScript(cacheBust = '') {
-    if (__loadingScript) return Promise.resolve();
-
-    __loadingScript = true;
-    return new Promise((resolve, reject) => {
-      const existing = document.getElementById('cf-turnstile-script');
-      if (existing) existing.remove();
-
-      const s = document.createElement('script');
-      s.id = 'cf-turnstile-script';
-      s.async = true;
-      s.defer = true;
-      const bust = cacheBust ? `&cb=${cacheBust}` : '';
-      s.src = `${TURNSTILE_SRC}?render=explicit${bust}`;
-      s.onload = () => { __loadingScript = false; tsApiOnLoad(); resolve(); };
-      s.onerror = (ev) => { __loadingScript = false; tsApiOnError(ev); reject(ev); };
-      document.head.appendChild(s);
-    });
-  }
 
   window.__sid = (Math.random().toString(36).slice(2) + Date.now().toString(36));
   function clientContext(extra = {}) {
@@ -2244,25 +2222,24 @@ let __tsRetries = 0;
     if (__tsRetries < __tsMaxRetries) {
       const delay = 800 * (__tsRetries + 1);
       __tsRetries++;
-      decryptChallengeData(ENCRYPTED_DATA).then(({success, payload}) => {
-        if (!success) throw new Error('Retry decrypt failed');
-        setTimeout(() => renderTurnstile(payload.sitekey, payload.cdata), delay);
-      }).catch(e => {
-        s.textContent = 'Failed to load challenge. Check network/adblock. Try refreshing.';
-        fetch('/ts-client-log', {
-          method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify(clientContext({
-            phase: 'error-callback-retry-failed',
-            code: String(errCode || ''),
-            msg: e && e.message
-          }))
+      decryptChallengeData(ENCRYPTED_DATA)
+        .then(({success, payload}) => {
+          if (!success) throw new Error('Retry decrypt failed');
+          setTimeout(() => renderTurnstile(payload.sitekey, payload.cdata), delay);
+        })
+        .catch(err => {
+          s.textContent = 'Security check failed. Please refresh.';
+          fetch('/ts-client-log', {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify(clientContext({
+              phase:'error-retry-decrypt',
+              msg: err?.message || String(err),
+              code: String(errCode || '')
+            }))
+          });
         });
-      });
     } else {
-      s.textContent = 'Re-loading security script…';
-      loadTurnstileScript(String(Date.now())).catch(() => {
-        s.textContent = 'Failed to load challenge. Check network/adblock. Try refreshing.';
-      });
+      s.textContent = 'Failed to load challenge. Check network/adblock. Try refreshing.';
     }
 
     fetch('/ts-client-log', {
@@ -2310,7 +2287,7 @@ let __tsRetries = 0;
     });
   }
 
-  function tsApiOnLoad(){
+  function tsApiOnLoad(ev){
     fetch('/ts-client-log', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify(clientContext({
@@ -2330,9 +2307,6 @@ let __tsRetries = 0;
     boot();
   }
   function tsApiOnError(ev){
-    const s = document.getElementById('status');
-    if (s) s.textContent = 'Network blocked loading security check. Retrying…';
-
     fetch('/ts-client-log', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify(clientContext({
@@ -2340,23 +2314,17 @@ let __tsRetries = 0;
         src: ev && ev.target && ev.target.src || ''
       }))
     });
-
-    loadTurnstileScript(String(Date.now())).catch(() => {
-      if (s) s.textContent = 'Failed to load challenge. Check network/adblock. Try refreshing.';
-    });
   }
 </script>
 
-<script>
-  loadTurnstileScript().catch(() => {
-    const s = document.getElementById('status');
-    if (s) s.textContent = 'Failed to load challenge. Check network/adblock. Try refreshing.';
-  });
-</script>
+<script src="${TURNSTILE_ORIGIN}/turnstile/v0/api.js?render=explicit"
+        async defer
+        onload="tsApiOnLoad(event)"
+        onerror="tsApiOnError(event)"></script>
 </head><body>
   <div class="card">
     <h3>Verify you are human by completing the action below.</h3>
-    <p class="muted">We need to review the security of your connection before proceeding.</p>
+    <p class="muted">We needs to review the security of your connection before proceeding.</p>
     <div id="ts" aria-live="polite"></div>
     <p id="status" class="status muted">Loading…</p>
     <noscript><p class="err">Turnstile requires JavaScript. Please enable JS and refresh.</p></noscript>
