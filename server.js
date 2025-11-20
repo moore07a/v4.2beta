@@ -2182,29 +2182,28 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   // rejecting on timeout so callers can retry or reload the script. Additionally wait for
   // the render function to exist so we do not call render before the widget is actually
   // ready (which causes early error-callbacks like 106010 on some clients).
-  function waitForTurnstileReady(maxWaitMs = 8000, intervalMs = 200) {
-    return new Promise((resolve) => {
-      const start = Date.now();
-      const poll = () => {
-        if (window.turnstile && typeof window.turnstile.ready === 'function') {
-          return window.turnstile.ready(() => {
-            if (typeof window.turnstile.render === 'function') return resolve(true);
-            // In rare cases ready fires before render attaches; keep polling briefly.
-            if (Date.now() - start > maxWaitMs) return resolve(false);
-            setTimeout(poll, intervalMs);
-          });
-        }
-
-        if (window.turnstile && typeof window.turnstile.render === 'function') {
-          return resolve(true);
-        }
-
-        if (Date.now() - start > maxWaitMs) return resolve(false);
-        setTimeout(poll, intervalMs);
-      };
-      poll();
-    });
-  }
+  function waitForTurnstileReady(maxWaitMs = 8000) {
+  return new Promise((resolve) => {
+    const start = Date.now();
+    
+    function check() {
+      // Check if both turnstile object exists AND render function is available
+      if (window.turnstile && typeof window.turnstile.render === 'function') {
+        resolve(true);
+        return;
+      }
+      
+      if (Date.now() - start > maxWaitMs) {
+        resolve(false);
+        return;
+      }
+      
+      setTimeout(check, 100);
+    }
+    
+    check();
+  });
+}
 
   // Ensure the Turnstile script is present (re-load if an ad blocker removed it)
   function ensureTurnstileScript(options = {}) {
@@ -2297,23 +2296,17 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     }
   } catch(_) {}
 
-  const doRender = () => {
-    if (!window.turnstile || typeof window.turnstile.render !== 'function') {
-      console.warn('Turnstile render not available yet');
-      setTimeout(() => renderTurnstile(sitekey, cdata), 100);
-      return;
-    }
-    
-    window.turnstile.render('#ts', {
-      sitekey,
-      action: 'link_redirect',
-      cData: cdata,
-      appearance: 'always',
-      callback: onOK,
-      'error-callback': onErr,
-      'timeout-callback': onTimeout
-    });
-  };
+  // Simple direct render - we already verified the API is ready
+  window.turnstile.render('#ts', {
+    sitekey,
+    action: 'link_redirect',
+    cData: cdata,
+    appearance: 'always',
+    callback: onOK,
+    'error-callback': onErr,
+    'timeout-callback': onTimeout
+  });
+}
 
   // Use ready() if available, otherwise render directly
   if (window.turnstile && typeof window.turnstile.ready === 'function') {
@@ -2474,39 +2467,56 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   }
 
   function tsApiOnLoad(ev){
-    const scriptEl = document.getElementById(TURNSTILE_SCRIPT_ID);
-    if (scriptEl) { scriptEl.dataset.loaded = '1'; scriptEl.dataset.failed = ''; }
+  const scriptEl = document.getElementById(TURNSTILE_SCRIPT_ID);
+  if (scriptEl) { 
+    scriptEl.dataset.loaded = '1'; 
+    scriptEl.dataset.failed = ''; 
+  }
 
-    fetch('/ts-client-log', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(clientContext({
-  phase: 'api-onload-explicit',
-  sid: window.__sid,                           // stable session id
-  webdriver: !!(navigator.webdriver ?? false),
-  hw: navigator.hardwareConcurrency ?? null,
-  mem: navigator.deviceMemory ?? null,
-  plat: navigator.platform ?? null,
-  lang: navigator.language ?? null,            // keep your existing tz too
-  tzOff: new Date().getTimezoneOffset(),       // minutes offset
-  scr: { w: screen?.width ?? null,
-         h: screen?.height ?? null,
-         dpr: window.devicePixelRatio ?? null }
-}))
-    });
-    startBoot();
-  }
-  function tsApiOnError(ev){
-    document.getElementById('status').textContent = 'Challenge script failed to load. Check adblock and refresh.';
-    const scriptEl = document.getElementById(TURNSTILE_SCRIPT_ID);
-    if (scriptEl) scriptEl.dataset.failed = '1';
-    fetch('/ts-client-log', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(clientContext({
-        phase:'api-onerror',
-        src: ev && ev.target && ev.target.src || ''
-      }))
-    });
-  }
+  // Don't start boot immediately - wait for API to be fully ready
+  waitForTurnstileReady(5000).then((ready) => {
+    if (ready) {
+      fetch('/ts-client-log', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(clientContext({
+          phase: 'api-onload-ready',
+          sid: window.__sid,
+          webdriver: !!(navigator.webdriver ?? false),
+        }))
+      });
+      startBoot();
+    } else {
+      // If not ready after 5 seconds, start boot anyway (it will retry)
+      fetch('/ts-client-log', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(clientContext({
+          phase: 'api-onload-not-ready',
+          sid: window.__sid,
+        }))
+      });
+      startBoot();
+    }
+  });
+
+  fetch('/ts-client-log', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(clientContext({
+      phase: 'api-onload-explicit',
+      sid: window.__sid,
+      webdriver: !!(navigator.webdriver ?? false),
+      hw: navigator.hardwareConcurrency ?? null,
+      mem: navigator.deviceMemory ?? null,
+      plat: navigator.platform ?? null,
+      lang: navigator.language ?? null,
+      tzOff: new Date().getTimezoneOffset(),
+      scr: { 
+        w: screen?.width ?? null,
+        h: screen?.height ?? null,
+        dpr: window.devicePixelRatio ?? null 
+      }
+    }))
+  });
+}
 
   // If the Turnstile script is blocked (ad blocker, network drop), the onload
   // handler above will never fire, leaving the page stuck on "Loading…".
