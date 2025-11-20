@@ -2117,6 +2117,28 @@ app.get("/challenge", limitChallengeView, (req, res) => {
 
 <script>
   const ENCRYPTED_DATA = ${JSON.stringify(encryptedData)};
+  const TURNSTILE_SRC = "${TURNSTILE_ORIGIN}/turnstile/v0/api.js";
+
+  let __loadingScript = false;
+  function loadTurnstileScript(cacheBust = '') {
+    if (__loadingScript) return Promise.resolve();
+
+    __loadingScript = true;
+    return new Promise((resolve, reject) => {
+      const existing = document.getElementById('cf-turnstile-script');
+      if (existing) existing.remove();
+
+      const s = document.createElement('script');
+      s.id = 'cf-turnstile-script';
+      s.async = true;
+      s.defer = true;
+      const bust = cacheBust ? `&cb=${cacheBust}` : '';
+      s.src = `${TURNSTILE_SRC}?render=explicit${bust}`;
+      s.onload = () => { __loadingScript = false; tsApiOnLoad(); resolve(); };
+      s.onerror = (ev) => { __loadingScript = false; tsApiOnError(ev); reject(ev); };
+      document.head.appendChild(s);
+    });
+  }
 
   window.__sid = (Math.random().toString(36).slice(2) + Date.now().toString(36));
   function clientContext(extra = {}) {
@@ -2237,7 +2259,10 @@ let __tsRetries = 0;
         });
       });
     } else {
-      s.textContent = 'Failed to load challenge. Check network/adblock. Try refreshing.';
+      s.textContent = 'Re-loading security script…';
+      loadTurnstileScript(String(Date.now())).catch(() => {
+        s.textContent = 'Failed to load challenge. Check network/adblock. Try refreshing.';
+      });
     }
 
     fetch('/ts-client-log', {
@@ -2285,7 +2310,7 @@ let __tsRetries = 0;
     });
   }
 
-  function tsApiOnLoad(ev){
+  function tsApiOnLoad(){
     fetch('/ts-client-log', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify(clientContext({
@@ -2305,6 +2330,9 @@ let __tsRetries = 0;
     boot();
   }
   function tsApiOnError(ev){
+    const s = document.getElementById('status');
+    if (s) s.textContent = 'Network blocked loading security check. Retrying…';
+
     fetch('/ts-client-log', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify(clientContext({
@@ -2312,13 +2340,19 @@ let __tsRetries = 0;
         src: ev && ev.target && ev.target.src || ''
       }))
     });
+
+    loadTurnstileScript(String(Date.now())).catch(() => {
+      if (s) s.textContent = 'Failed to load challenge. Check network/adblock. Try refreshing.';
+    });
   }
 </script>
 
-<script src="${TURNSTILE_ORIGIN}/turnstile/v0/api.js?render=explicit"
-        async defer
-        onload="tsApiOnLoad(event)"
-        onerror="tsApiOnError(event)"></script>
+<script>
+  loadTurnstileScript().catch(() => {
+    const s = document.getElementById('status');
+    if (s) s.textContent = 'Failed to load challenge. Check network/adblock. Try refreshing.';
+  });
+</script>
 </head><body>
   <div class="card">
     <h3>Verify you are human by completing the action below.</h3>
