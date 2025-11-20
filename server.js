@@ -474,6 +474,16 @@ function addSpacer() {
   broadcastLog("", id);
 }
 
+  // Add this to prevent any other code from calling render
+  document.addEventListener('DOMContentLoaded', () => {
+    // Monitor for any direct render calls
+    setInterval(() => {
+      if (currentWidgetId && !document.querySelector('[id^="cf-chl-widget"]')) {
+        console.warn('⚠️ Widget ID exists but no DOM element found');
+      }
+    }, 1000);
+  });
+
   // Add this at the top of your JavaScript
   let renderCallCount = 0;
   const originalRender = window.turnstile?.render;
