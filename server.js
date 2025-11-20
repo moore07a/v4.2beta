@@ -2341,12 +2341,20 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     });
   }
 
+  const domReady = new Promise((resolve) => {
+    if (document.readyState === 'complete' || document.readyState === 'interactive') {
+      resolve();
+    } else {
+      document.addEventListener('DOMContentLoaded', () => resolve(), { once: true });
+    }
+  });
+
   let bootStarted = false;
 
   function startBoot(attempt = 0) {
     if (bootStarted && attempt === 0) return;
     bootStarted = true;
-    boot(attempt);
+    domReady.then(() => boot(attempt));
   }
 
   function boot(attempt = 0){
