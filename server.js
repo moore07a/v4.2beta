@@ -2215,8 +2215,6 @@ app.get("/challenge", limitChallengeView, (req, res) => {
       const script = document.createElement('script');
       script.id = TURNSTILE_SCRIPT_ID;
       script.src = TURNSTILE_SCRIPT_SRC;
-      script.async = true;
-      script.defer = true;
       script.onload = () => {
         script.dataset.loaded = '1';
         resolve('load');
@@ -2420,7 +2418,6 @@ app.get("/challenge", limitChallengeView, (req, res) => {
 </script>
 
 <script id="cf-turnstile-script" src="${TURNSTILE_ORIGIN}/turnstile/v0/api.js?render=explicit"
-        async defer
         onload="tsApiOnLoad(event)"
         onerror="tsApiOnError(event)"></script>
 </head><body>
