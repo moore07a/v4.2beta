@@ -2139,7 +2139,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
 <script>
   const ENCRYPTED_DATA = ${JSON.stringify(encryptedData)};
   const TURNSTILE_ORIGIN = "https://challenges.cloudflare.com";
-  const TURNSTILE_SCRIPT_SRC = "${TURNSTILE_ORIGIN}/turnstile/v0/api.js?render=explicit";
+  const TURNSTILE_SCRIPT_SRC = TURNSTILE_ORIGIN + "/turnstile/v0/api.js?render=explicit";
   const TURNSTILE_SCRIPT_ID = "cf-turnstile-script";
 
   let currentWidgetId = null;
@@ -2148,7 +2148,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
 
   window.__sid = (Math.random().toString(36).slice(2) + Date.now().toString(36));
   
-  function clientContext(extra = {}) {
+  function clientContext(extra) {
     return {
       phase: extra.phase || 'context',
       sid: window.__sid,
@@ -2157,17 +2157,13 @@ app.get("/challenge", limitChallengeView, (req, res) => {
       online: navigator.onLine,
       vis: document.visibilityState,
       ref: document.referrer || '',
-      ts: Date.now(),
-      ...extra
+      ts: Date.now()
     };
   }
 
-  // Track all render calls
   function trackRenderCall(phase) {
     const stack = new Error().stack;
-    const stackTrace = stack ? stack.split('\n').slice(2, 6).join(' | ') : 'no-stack';
-    
-    console.log('Render call detected - Phase:', phase, 'Stack:', stackTrace);
+    const stackTrace = stack ? stack.split('\\n').slice(2, 6).join(' | ') : 'no-stack';
     
     fetch('/ts-client-log', {
       method:'POST', headers:{'Content-Type':'application/json'},
@@ -2181,7 +2177,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     });
   }
 
-  window.addEventListener('error', (e) => {
+  window.addEventListener('error', function(e) {
     fetch('/ts-client-log', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify(clientContext({
@@ -2192,7 +2188,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     });
   }, true);
 
-  window.addEventListener('unhandledrejection', (e) => {
+  window.addEventListener('unhandledrejection', function(e) {
     fetch('/ts-client-log', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify(clientContext({
@@ -2205,14 +2201,14 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   function decryptChallengeData(encrypted) {
     return fetch('/decrypt-challenge-data', {
       method: 'POST',
-      headers: {'Content-Type': 'application/json'},
+      headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ data: encrypted })
-    }).then(r => r.json());
+    }).then(function(r) { return r.json(); });
   }
 
-  const getChallengePayload = (() => {
-    let cached = null;
-    return (reset = false) => {
+  var getChallengePayload = (function() {
+    var cached = null;
+    return function(reset) {
       if (reset) cached = null;
       if (!cached) cached = decryptChallengeData(ENCRYPTED_DATA);
       return cached;
@@ -2220,47 +2216,45 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   })();
 
   function ensureTurnstileScript() {
-    return new Promise((resolve, reject) => {
+    return new Promise(function(resolve, reject) {
       if (window.turnstile) {
-        // Patch the render function to track calls
         if (window.turnstile.render && !window.turnstile.render._patched) {
-          const originalRender = window.turnstile.render;
-          window.turnstile.render = function(...args) {
+          var originalRender = window.turnstile.render;
+          window.turnstile.render = function() {
             renderCallCount++;
             trackRenderCall('render-call-' + renderCallCount);
-            return originalRender.apply(this, args);
+            return originalRender.apply(this, arguments);
           };
           window.turnstile.render._patched = true;
         }
         return resolve('already-loaded');
       }
 
-      const existing = document.getElementById(TURNSTILE_SCRIPT_ID);
+      var existing = document.getElementById(TURNSTILE_SCRIPT_ID);
       if (existing) {
         if (existing.dataset.loaded === '1') return resolve('cached');
-        existing.addEventListener('load', () => resolve('load'));
-        existing.addEventListener('error', () => reject(new Error('Turnstile script failed to load')));
+        existing.addEventListener('load', function() { resolve('load'); });
+        existing.addEventListener('error', function() { reject(new Error('Turnstile script failed to load')); });
         return;
       }
 
-      const script = document.createElement('script');
+      var script = document.createElement('script');
       script.id = TURNSTILE_SCRIPT_ID;
       script.src = TURNSTILE_SCRIPT_SRC;
       script.async = true;
       script.defer = true;
       script.dataset.loading = '1';
-      script.onload = () => {
+      script.onload = function() {
         script.dataset.loaded = '1';
         script.dataset.loading = '';
         
-        // Patch render function after script loads
-        setTimeout(() => {
+        setTimeout(function() {
           if (window.turnstile && window.turnstile.render && !window.turnstile.render._patched) {
-            const originalRender = window.turnstile.render;
-            window.turnstile.render = function(...args) {
+            var originalRender = window.turnstile.render;
+            window.turnstile.render = function() {
               renderCallCount++;
               trackRenderCall('render-call-' + renderCallCount);
-              return originalRender.apply(this, args);
+              return originalRender.apply(this, arguments);
             };
             window.turnstile.render._patched = true;
           }
@@ -2268,7 +2262,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
         
         resolve('load');
       };
-      script.onerror = () => {
+      script.onerror = function() {
         script.dataset.failed = '1';
         script.dataset.loading = '';
         reject(new Error('Turnstile script failed to load'));
@@ -2278,24 +2272,25 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   }
 
   function onOK(token){
-    const s = document.getElementById('status'); 
+    var s = document.getElementById('status'); 
     s.textContent = 'Verifying...';
     currentWidgetId = null;
     
-    getChallengePayload().then(data => {
+    getChallengePayload().then(function(data) {
       if (!data.success) throw new Error('Decryption failed');
-      const { next, lh } = data.payload;
+      var next = data.payload.next;
+      var lh = data.payload.lh;
 
       try {
-        const decoded = decodeURIComponent(next);
-        const parts = decoded.split('?');
-        const base = parts[0];
-        const qs = parts[1] || '';
-        const sp = new URLSearchParams(qs);
+        var decoded = decodeURIComponent(next);
+        var parts = decoded.split('?');
+        var base = parts[0];
+        var qs = parts[1] || '';
+        var sp = new URLSearchParams(qs);
         sp.delete('cft'); sp.delete('lh');
         sp.append('cft', token);
         sp.append('lh', lh);
-        const suffix = '&' + sp.toString();
+        var suffix = '&' + sp.toString();
         location.href = '/r?d=' + encodeURIComponent(base) + suffix;
       } catch(e) {
         s.textContent = 'Navigation error. Please retry.';
@@ -2304,7 +2299,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
           body: JSON.stringify(clientContext({ phase:'callback-nav', msg:e.message, stack:e.stack }))
         });
       }
-    }).catch(e => {
+    }).catch(function(e) {
       s.textContent = 'Security error. Please refresh.';
       fetch('/ts-client-log', {
         method:'POST', headers:{'Content-Type':'application/json'},
@@ -2313,15 +2308,14 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     });
   }
 
-  let __tsRetries = 0;
-  const __tsMaxRetries = 2;
+  var __tsRetries = 0;
+  var __tsMaxRetries = 2;
 
   function safeRenderTurnstile(sitekey, cdata) {
     trackRenderCall('safeRenderTurnstile-start');
     
-    return new Promise((resolve) => {
+    return new Promise(function(resolve) {
       if (isRendering || currentWidgetId) {
-        console.warn('BLOCKED: Render in progress or widget exists', { isRendering, currentWidgetId });
         trackRenderCall('render-blocked-duplicate');
         resolve(null);
         return;
@@ -2329,19 +2323,17 @@ app.get("/challenge", limitChallengeView, (req, res) => {
       
       isRendering = true;
       
-      const tsContainer = document.getElementById('ts');
+      var tsContainer = document.getElementById('ts');
       if (!tsContainer) {
-        console.error('Turnstile container not found');
         isRendering = false;
         resolve(null);
         return;
       }
 
       tsContainer.innerHTML = '<div id="ts-inner" style="min-height:65px"></div>';
-      const innerContainer = document.getElementById('ts-inner');
+      var innerContainer = document.getElementById('ts-inner');
       
       if (!innerContainer) {
-        console.error('Inner container creation failed');
         isRendering = false;
         resolve(null);
         return;
@@ -2350,25 +2342,21 @@ app.get("/challenge", limitChallengeView, (req, res) => {
       if (currentWidgetId && window.turnstile && typeof window.turnstile.remove === 'function') {
         try {
           window.turnstile.remove(currentWidgetId);
-        } catch (e) {
-          console.warn('During widget removal:', e);
-        }
+        } catch (e) {}
       }
       currentWidgetId = null;
 
-      setTimeout(() => {
+      setTimeout(function() {
         if (!window.turnstile || typeof window.turnstile.render !== 'function') {
-          console.error('Turnstile API not available');
           isRendering = false;
           resolve(null);
           return;
         }
 
         try {
-          console.log('Attempting Turnstile render...');
           trackRenderCall('before-render-attempt');
-          const widgetId = window.turnstile.render(innerContainer, {
-            sitekey,
+          var widgetId = window.turnstile.render(innerContainer, {
+            sitekey: sitekey,
             action: 'link_redirect',
             cData: cdata,
             appearance: 'always',
@@ -2379,17 +2367,14 @@ app.get("/challenge", limitChallengeView, (req, res) => {
           
           if (widgetId) {
             currentWidgetId = widgetId;
-            console.log('Turnstile render SUCCESS, widget ID:', widgetId);
             trackRenderCall('render-success');
             isRendering = false;
             resolve(widgetId);
           } else {
-            console.error('Turnstile render returned null widget ID');
             isRendering = false;
             resolve(null);
           }
         } catch (renderError) {
-          console.error('Turnstile render exception:', renderError);
           isRendering = false;
           resolve(null);
         }
@@ -2398,26 +2383,25 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   }
   
   function onErr(errCode){
-    const s = document.getElementById('status');
-    console.warn('Turnstile error code:', errCode);
+    var s = document.getElementById('status');
     trackRenderCall('error-callback-' + errCode);
 
     currentWidgetId = null;
     isRendering = false;
 
     if (__tsRetries < __tsMaxRetries) {
-      const delay = 1000 * (__tsRetries + 1);
+      var delay = 1000 * (__tsRetries + 1);
       __tsRetries++;
 
       getChallengePayload(__tsRetries === 1)
-        .then(({success, payload}) => {
-          if (!success) throw new Error('Retry decrypt failed');
+        .then(function(data) {
+          if (!data.success) throw new Error('Retry decrypt failed');
           
-          setTimeout(() => {
-            safeRenderTurnstile(payload.sitekey, payload.cdata);
+          setTimeout(function() {
+            safeRenderTurnstile(data.payload.sitekey, data.payload.cdata);
           }, delay);
         })
-        .catch(err => {
+        .catch(function(err) {
           s.textContent = 'Security check failed. Please refresh.';
         });
     } else {
@@ -2433,7 +2417,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
         retryCount: __tsRetries,
         renderCallCount: renderCallCount,
         currentWidgetId: currentWidgetId,
-        webdriver: !!(navigator.webdriver ?? false)
+        webdriver: !!(navigator.webdriver || false)
       }))
     });
   }
@@ -2445,40 +2429,39 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     
     fetch('/ts-client-log', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(clientContext({ phase:'timeout', webdriver: !!(navigator.webdriver ?? false) }))
+      body: JSON.stringify(clientContext({ phase:'timeout', webdriver: !!(navigator.webdriver || false) }))
     });
   }
 
   function startBoot() {
-    const domReady = new Promise((resolve) => {
+    var domReady = new Promise(function(resolve) {
       if (document.readyState === 'complete' || document.readyState === 'interactive') {
         resolve();
       } else {
-        document.addEventListener('DOMContentLoaded', () => resolve(), { once: true });
+        document.addEventListener('DOMContentLoaded', function() { resolve(); }, { once: true });
       }
     });
 
-    domReady.then(() => {
-      const statusEl = document.getElementById('status');
+    domReady.then(function() {
+      var statusEl = document.getElementById('status');
       statusEl.textContent = 'Loading security check...';
 
       ensureTurnstileScript()
-        .then(() => getChallengePayload())
-        .then(data => {
+        .then(function() { return getChallengePayload(); })
+        .then(function(data) {
           if (!data.success) throw new Error(data.error || 'Decryption failed');
           return data.payload;
         })
-        .then(payload => {
-          return new Promise((resolve) => {
-            const checkTurnstileReady = () => {
+        .then(function(payload) {
+          return new Promise(function(resolve) {
+            function checkTurnstileReady() {
               if (window.turnstile && 
                   typeof window.turnstile.render === 'function' &&
                   typeof window.turnstile.ready === 'function' &&
                   typeof window.turnstile.remove === 'function') {
                 
-                window.turnstile.ready(() => {
-                  setTimeout(() => {
-                    console.log('Turnstile fully confirmed ready');
+                window.turnstile.ready(function() {
+                  setTimeout(function() {
                     resolve(payload);
                   }, 500);
                 });
@@ -2486,23 +2469,21 @@ app.get("/challenge", limitChallengeView, (req, res) => {
               } else {
                 setTimeout(checkTurnstileReady, 100);
               }
-            };
+            }
             
             checkTurnstileReady();
             
-            setTimeout(() => {
-              console.warn('Turnstile readiness timeout, proceeding anyway');
+            setTimeout(function() {
               resolve(payload);
             }, 10000);
           });
         })
-        .then(payload => {
+        .then(function(payload) {
           return safeRenderTurnstile(payload.sitekey, payload.cdata);
         })
-        .then((widgetId) => {
+        .then(function(widgetId) {
           if (widgetId) {
             statusEl.textContent = 'Challenge ready.';
-            console.log('Turnstile rendered successfully on first attempt');
             
             fetch('/ts-client-log', {
               method:'POST', headers:{'Content-Type':'application/json'},
@@ -2517,15 +2498,14 @@ app.get("/challenge", limitChallengeView, (req, res) => {
             throw new Error('Widget rendering failed');
           }
         })
-        .catch(e => {
+        .catch(function(e) {
           statusEl.textContent = 'Security initialization failed. Please refresh.';
-          console.error('Boot failed:', e);
         });
     });
   }
 
   function tsApiOnLoad(ev){
-    const scriptEl = document.getElementById(TURNSTILE_SCRIPT_ID);
+    var scriptEl = document.getElementById(TURNSTILE_SCRIPT_ID);
     if (scriptEl) { 
       scriptEl.dataset.loaded = '1'; 
       scriptEl.dataset.failed = ''; 
@@ -2536,7 +2516,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
       body: JSON.stringify(clientContext({
         phase: 'api-onload-explicit',
         sid: window.__sid,
-        webdriver: !!(navigator.webdriver ?? false)
+        webdriver: !!(navigator.webdriver || false)
       }))
     });
 
@@ -2545,7 +2525,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
 
   function tsApiOnError(ev){
     document.getElementById('status').textContent = 'Challenge script failed to load. Check adblock and refresh.';
-    const scriptEl = document.getElementById(TURNSTILE_SCRIPT_ID);
+    var scriptEl = document.getElementById(TURNSTILE_SCRIPT_ID);
     if (scriptEl) scriptEl.dataset.failed = '1';
     fetch('/ts-client-log', {
       method:'POST', headers:{'Content-Type':'application/json'},
@@ -2557,7 +2537,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   }
 </script>
 
-<script id="cf-turnstile-script" src="${TURNSTILE_ORIGIN}/turnstile/v0/api.js?render=explicit"
+<script id="cf-turnstile-script" src="` + TURNSTILE_ORIGIN + `/turnstile/v0/api.js?render=explicit"
         onload="tsApiOnLoad(event)"
         onerror="tsApiOnError(event)"></script>
 </head><body>
@@ -2565,7 +2545,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     <h3>Verify you are human by completing the action below.</h3>
     <p class="muted">We needs to review the security of your connection before proceeding.</p>
     <div id="ts" aria-live="polite"></div>
-    <p id="status" class="status muted">Loading…</p>
+    <p id="status" class="status muted">Loading...</p>
     <noscript><p class="err">Turnstile requires JavaScript. Please enable JS and refresh.</p></noscript>
     <p class="muted" style="margin-top:18px">Protected by Cloudflare Turnstile</p>
   </div>
