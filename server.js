@@ -2360,10 +2360,17 @@ app.get("/challenge", limitChallengeView, (req, res) => {
       }, 300);
     });
   }
-  
+
   function onErr(errCode){
     var s = document.getElementById('status');
     trackRenderCall('error-callback-' + errCode);
+
+    // IGNORE 106010 errors - first render was successful
+    if (errCode === '106010') {
+      console.log('Ignoring 106010 error - widget already successfully rendered');
+      s.textContent = 'Challenge ready.';
+      return; // DO NOT retry
+    }
 
     currentWidgetId = null;
     isRendering = false;
@@ -2400,7 +2407,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
       }))
     });
   }
-
+  
   function onTimeout(){
     document.getElementById('status').textContent = 'Challenge timed out. Refresh the page.';
     currentWidgetId = null;
