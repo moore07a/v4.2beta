@@ -2037,6 +2037,8 @@ app.use(["/view-log", "/__debug", "/admin"], (req, res, next) => {
   next();
 });
 
+// Replace the entire challenge route HTML content with this fixed version:
+
 app.get("/challenge", limitChallengeView, (req, res) => {
   let nextEnc = "";
   
@@ -2118,14 +2120,16 @@ app.get("/challenge", limitChallengeView, (req, res) => {
 <script>
   const ENCRYPTED_DATA = ${JSON.stringify(encryptedData)};
   const TURNSTILE_ORIGIN = "https://challenges.cloudflare.com";
-  const TURNSTILE_SCRIPT_SRC = TURNSTILE_ORIGIN + "/turnstile/v0/api.js?render=explicit";
   const TURNSTILE_SCRIPT_ID = "cf-turnstile-script";
 
+  // SINGLETON STATE MANAGEMENT - Prevent duplicates
   let currentWidgetId = null;
   let isRendering = false;
-  let renderCallCount = 0;
   let scriptLoaded = false;
   let initializationStarted = false;
+  let turnstileReady = false;
+  let renderAttempts = 0;
+  const MAX_RENDER_ATTEMPTS = 1; // Only allow one render attempt
 
   window.__sid = (Math.random().toString(36).slice(2) + Date.now().toString(36));
   
@@ -2138,44 +2142,50 @@ app.get("/challenge", limitChallengeView, (req, res) => {
       online: navigator.onLine,
       vis: document.visibilityState,
       ref: document.referrer || '',
-      ts: Date.now()
+      ts: Date.now(),
+      widgetId: currentWidgetId,
+      isRendering: isRendering,
+      scriptLoaded: scriptLoaded,
+      turnstileReady: turnstileReady,
+      renderAttempts: renderAttempts
     };
   }
 
-  function trackRenderCall(phase) {
-    const stack = new Error().stack;
-    const stackTrace = stack ? stack.split('\\n').slice(2, 6).join(' | ') : 'no-stack';
+  function trackPhase(phase, data = {}) {
+    const context = clientContext({ phase, ...data });
     
-    fetch('/ts-client-log', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(clientContext({
-        phase: phase,
-        renderCallCount: renderCallCount,
-        currentWidgetId: currentWidgetId,
-        isRendering: isRendering,
-        stackTrace: stackTrace
-      }))
-    });
+    // Only log critical phases to reduce noise
+    const criticalPhases = [
+      'script-load-error',
+      'render-blocked-duplicate', 
+      'render-success',
+      'render-error',
+      'error-callback',
+      'timeout',
+      'navigation-error'
+    ];
+    
+    if (criticalPhases.includes(phase)) {
+      fetch('/ts-client-log', {
+        method: 'POST', 
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(context)
+      }).catch(() => {}); // Silent fail for logging errors
+    }
   }
 
   window.addEventListener('error', function(e) {
-    fetch('/ts-client-log', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(clientContext({
-        phase:'window-error',
-        filename: e.filename, lineno: e.lineno, colno: e.colno,
-        message: String(e.message||'')
-      }))
+    trackPhase('window-error', {
+      filename: e.filename, 
+      lineno: e.lineno, 
+      colno: e.colno,
+      message: String(e.message||'')
     });
   }, true);
 
   window.addEventListener('unhandledrejection', function(e) {
-    fetch('/ts-client-log', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(clientContext({
-        phase:'unhandledrejection',
-        reason: String(e.reason && (e.reason.stack||e.reason.message||e.reason) || '')
-      }))
+    trackPhase('unhandledrejection', {
+      reason: String(e.reason && (e.reason.stack||e.reason.message||e.reason) || '')
     });
   });
 
@@ -2184,7 +2194,10 @@ app.get("/challenge", limitChallengeView, (req, res) => {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ data: encrypted })
-    }).then(function(r) { return r.json(); });
+    }).then(function(r) { 
+      if (!r.ok) throw new Error('Network response was not ok');
+      return r.json(); 
+    });
   }
 
   var getChallengePayload = (function() {
@@ -2196,7 +2209,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     };
   })();
 
-  // SINGLE SCRIPT LOADING METHOD - Fixed duplicate widget issue
+  // SINGLE INITIALIZATION CONTROLLER
   function initializeTurnstile() {
     if (initializationStarted) {
       console.log('[TS] Initialization already started, skipping duplicate');
@@ -2205,249 +2218,248 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     initializationStarted = true;
 
     const statusEl = document.getElementById('status');
+    if (!statusEl) {
+      console.error('[TS] Status element not found');
+      return;
+    }
+
     statusEl.textContent = 'Loading security check...';
+
+    // Wait for both DOM ready and Turnstile ready
+    function waitForTurnstileAndDOM() {
+      const isDOMReady = document.readyState === 'complete' || document.readyState === 'interactive';
+      const isTurnstileReady = window.turnstile && typeof window.turnstile.render === 'function';
+      
+      if (isDOMReady && isTurnstileReady && !turnstileReady) {
+        turnstileReady = true;
+        startWidgetRendering();
+      } else if (!isDOMReady || !isTurnstileReady) {
+        setTimeout(waitForTurnstileAndDOM, 100);
+      }
+    }
+
+    // Fallback timeout
+    const fallbackTimeout = setTimeout(() => {
+      if (!currentWidgetId && renderAttempts === 0) {
+        console.warn('[TS] Fallback: Starting render after timeout');
+        startWidgetRendering();
+      }
+    }, 8000);
+
+    function startWidgetRendering() {
+      clearTimeout(fallbackTimeout);
+      
+      getChallengePayload()
+        .then(function(data) {
+          if (!data.success) throw new Error(data.error || 'Decryption failed');
+          return data.payload;
+        })
+        .then(function(payload) {
+          safeRenderTurnstile(payload.sitekey, payload.cdata);
+        })
+        .catch(function(e) {
+          statusEl.textContent = 'Security initialization failed. Please refresh.';
+          console.error('[TS] Initialization error:', e);
+          trackPhase('initialization-error', { error: e.message });
+        });
+    }
+
+    // Start waiting for readiness
+    waitForTurnstileAndDOM();
+  }
+
+  // SINGLE RENDER FUNCTION with strict duplicate prevention
+  function safeRenderTurnstile(sitekey, cdata) {
+    if (renderAttempts >= MAX_RENDER_ATTEMPTS) {
+      console.log('[TS] Max render attempts reached, skipping');
+      trackPhase('render-blocked-max-attempts');
+      return;
+    }
+
+    if (isRendering) {
+      console.log('[TS] Already rendering, skipping duplicate');
+      trackPhase('render-blocked-rendering');
+      return;
+    }
+
+    if (currentWidgetId) {
+      console.log('[TS] Widget already exists, skipping duplicate');
+      trackPhase('render-blocked-existing-widget');
+      return;
+    }
+
+    renderAttempts++;
+    isRendering = true;
+    
+    const tsContainer = document.getElementById('ts');
+    const statusEl = document.getElementById('status');
+    
+    if (!tsContainer || !statusEl) {
+      console.error('[TS] Container or status element not found');
+      isRendering = false;
+      return;
+    }
+
+    // Clear any existing content
+    tsContainer.innerHTML = '<div id="ts-inner" style="min-height:65px; display:flex; justify-content:center;"></div>';
+    const innerContainer = document.getElementById('ts-inner');
+    
+    if (!innerContainer) {
+      console.error('[TS] Inner container not found');
+      isRendering = false;
+      return;
+    }
+
+    // Small delay to ensure DOM is updated
+    setTimeout(() => {
+      if (!window.turnstile || typeof window.turnstile.render !== 'function') {
+        console.error('[TS] Turnstile not available for rendering');
+        statusEl.textContent = 'Security component not loaded. Please refresh.';
+        isRendering = false;
+        trackPhase('render-error-turnstile-unavailable');
+        return;
+      }
+
+      try {
+        console.log('[TS] Starting widget render attempt', renderAttempts);
+        
+        const widgetId = window.turnstile.render(innerContainer, {
+          sitekey: sitekey,
+          action: 'link_redirect',
+          cData: cdata,
+          appearance: 'always',
+          callback: onOK,
+          'error-callback': onErr,
+          'timeout-callback': onTimeout
+        });
+        
+        if (widgetId) {
+          currentWidgetId = widgetId;
+          isRendering = false;
+          statusEl.textContent = 'Challenge ready.';
+          console.log('[TS] Widget rendered successfully:', widgetId);
+          trackPhase('render-success', { widgetId: widgetId });
+        } else {
+          console.error('[TS] Turnstile.render returned null widget ID');
+          isRendering = false;
+          statusEl.textContent = 'Challenge failed to load. Please refresh.';
+          trackPhase('render-error-null-id');
+        }
+      } catch (renderError) {
+        console.error('[TS] Render exception:', renderError);
+        isRendering = false;
+        statusEl.textContent = 'Challenge error. Please refresh.';
+        trackPhase('render-exception', { error: renderError.message });
+      }
+    }, 100);
+  }
+
+  function onOK(token) {
+    console.log('[TS] Challenge completed successfully');
+    const statusEl = document.getElementById('status');
+    if (statusEl) {
+      statusEl.textContent = 'Verifying...';
+    }
+    
+    // Prevent multiple submissions
+    currentWidgetId = null;
 
     getChallengePayload()
       .then(function(data) {
-        if (!data.success) throw new Error(data.error || 'Decryption failed');
-        return data.payload;
-      })
-      .then(function(payload) {
-        // Wait for Turnstile to be ready
-        function checkTurnstileReady() {
-          if (window.turnstile && 
-              typeof window.turnstile.render === 'function' &&
-              typeof window.turnstile.ready === 'function' &&
-              typeof window.turnstile.remove === 'function') {
-            
-            window.turnstile.ready(function() {
-              setTimeout(function() {
-                safeRenderTurnstile(payload.sitekey, payload.cdata);
-              }, 500);
-            });
-            
-          } else {
-            setTimeout(checkTurnstileReady, 100);
-          }
+        if (!data.success) throw new Error('Decryption failed');
+        
+        const next = data.payload.next;
+        const lh = data.payload.lh;
+
+        try {
+          const decoded = decodeURIComponent(next);
+          const parts = decoded.split('?');
+          const base = parts[0];
+          const qs = parts[1] || '';
+          const sp = new URLSearchParams(qs);
+          sp.delete('cft'); 
+          sp.delete('lh');
+          sp.append('cft', token);
+          sp.append('lh', lh);
+          const suffix = '&' + sp.toString();
+          
+          console.log('[TS] Redirecting after successful challenge');
+          window.location.href = '/r?d=' + encodeURIComponent(base) + suffix;
+        } catch(e) {
+          console.error('[TS] Navigation error:', e);
+          if (statusEl) statusEl.textContent = 'Navigation error. Please retry.';
+          trackPhase('navigation-error', { error: e.message });
         }
-        
-        checkTurnstileReady();
-        
-        // Fallback timeout
-        setTimeout(function() {
-          if (!currentWidgetId) {
-            safeRenderTurnstile(payload.sitekey, payload.cdata);
-          }
-        }, 10000);
       })
       .catch(function(e) {
-        statusEl.textContent = 'Security initialization failed. Please refresh.';
-        console.error('[TS] Initialization error:', e);
+        console.error('[TS] Payload decryption error:', e);
+        if (statusEl) statusEl.textContent = 'Security error. Please refresh.';
+        trackPhase('decrypt-error', { error: e.message });
       });
   }
 
-  function safeRenderTurnstile(sitekey, cdata) {
-    trackRenderCall('safeRenderTurnstile-start');
+  function onErr(errCode) {
+    console.log('[TS] Error callback:', errCode);
     
-    return new Promise(function(resolve) {
-      if (isRendering || currentWidgetId) {
-        trackRenderCall('render-blocked-duplicate');
-        console.log('[TS] Widget already rendering or exists, skipping duplicate');
-        resolve(null);
-        return;
-      }
-      
-      isRendering = true;
-      
-      var tsContainer = document.getElementById('ts');
-      if (!tsContainer) {
-        isRendering = false;
-        resolve(null);
-        return;
-      }
-
-      tsContainer.innerHTML = '<div id="ts-inner" style="min-height:65px"></div>';
-      var innerContainer = document.getElementById('ts-inner');
-      
-      if (!innerContainer) {
-        isRendering = false;
-        resolve(null);
-        return;
-      }
-
-      if (currentWidgetId && window.turnstile && typeof window.turnstile.remove === 'function') {
-        try {
-          window.turnstile.remove(currentWidgetId);
-        } catch (e) {}
-      }
-      currentWidgetId = null;
-
-      setTimeout(function() {
-        if (!window.turnstile || typeof window.turnstile.render !== 'function') {
-          isRendering = false;
-          resolve(null);
-          return;
-        }
-
-        try {
-          trackRenderCall('before-render-attempt');
-          var widgetId = window.turnstile.render(innerContainer, {
-            sitekey: sitekey,
-            action: 'link_redirect',
-            cData: cdata,
-            appearance: 'always',
-            callback: onOK,
-            'error-callback': onErr,
-            'timeout-callback': onTimeout
-          });
-          
-          if (widgetId) {
-            currentWidgetId = widgetId;
-            trackRenderCall('render-success');
-            isRendering = false;
-            document.getElementById('status').textContent = 'Challenge ready.';
-            resolve(widgetId);
-          } else {
-            isRendering = false;
-            resolve(null);
-          }
-        } catch (renderError) {
-          console.error('[TS] Render error:', renderError);
-          isRendering = false;
-          resolve(null);
-        }
-      }, 300);
-    });
-  }
-
-  function onOK(token){
-    var s = document.getElementById('status'); 
-    s.textContent = 'Verifying...';
-    currentWidgetId = null;
-    
-    getChallengePayload().then(function(data) {
-      if (!data.success) throw new Error('Decryption failed');
-      var next = data.payload.next;
-      var lh = data.payload.lh;
-
-      try {
-        var decoded = decodeURIComponent(next);
-        var parts = decoded.split('?');
-        var base = parts[0];
-        var qs = parts[1] || '';
-        var sp = new URLSearchParams(qs);
-        sp.delete('cft'); sp.delete('lh');
-        sp.append('cft', token);
-        sp.append('lh', lh);
-        var suffix = '&' + sp.toString();
-        location.href = '/r?d=' + encodeURIComponent(base) + suffix;
-      } catch(e) {
-        s.textContent = 'Navigation error. Please retry.';
-        fetch('/ts-client-log', {
-          method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify(clientContext({ phase:'callback-nav', msg:e.message, stack:e.stack }))
-        });
-      }
-    }).catch(function(e) {
-      s.textContent = 'Security error. Please refresh.';
-      fetch('/ts-client-log', {
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify(clientContext({ phase:'decrypt-error', msg:e.message }))
-      });
-    });
-  }
-
-  var __tsRetries = 0;
-  var __tsMaxRetries = 2;
-
-  function onErr(errCode){
-    var s = document.getElementById('status');
-    trackRenderCall('error-callback-' + errCode);
-
-    // IGNORE 106010 errors - first render was successful
+    // Error 106010 means "already solved" - this is expected if user solved quickly
     if (errCode === '106010') {
-      console.log('Ignoring 106010 error - widget already successfully rendered');
-      s.textContent = 'Challenge ready.';
-      return; // DO NOT retry
+      console.log('[TS] Ignoring 106010 (challenge already solved)');
+      return; // DO NOT retry or reset state
     }
 
-    currentWidgetId = null;
-    isRendering = false;
-
-    if (__tsRetries < __tsMaxRetries) {
-      var delay = 1000 * (__tsRetries + 1);
-      __tsRetries++;
-
-      getChallengePayload(__tsRetries === 1)
-        .then(function(data) {
-          if (!data.success) throw new Error('Retry decrypt failed');
-          
-          setTimeout(function() {
-            safeRenderTurnstile(data.payload.sitekey, data.payload.cdata);
-          }, delay);
-        })
-        .catch(function(err) {
-          s.textContent = 'Security check failed. Please refresh.';
-        });
-    } else {
-      s.textContent = 'Too many attempts. Please refresh the page.';
-    }
-
-    fetch('/ts-client-log', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(clientContext({
-        phase: 'error-callback',
-        sid: window.__sid,
-        code: String(errCode || ''),
-        retryCount: __tsRetries,
-        renderCallCount: renderCallCount,
-        currentWidgetId: currentWidgetId,
-        webdriver: !!(navigator.webdriver || false)
-      }))
+    trackPhase('error-callback', { 
+      errorCode: String(errCode || ''),
+      widgetId: currentWidgetId,
+      renderAttempts: renderAttempts
     });
+
+    // For other errors, allow one retry but with careful state management
+    if (renderAttempts < 2) {
+      console.log('[TS] Scheduling retry for error:', errCode);
+      currentWidgetId = null;
+      isRendering = false;
+      
+      setTimeout(() => {
+        getChallengePayload(true) // Reset cache
+          .then(function(data) {
+            if (!data.success) throw new Error('Retry decrypt failed');
+            safeRenderTurnstile(data.payload.sitekey, data.payload.cdata);
+          })
+          .catch(function(err) {
+            const statusEl = document.getElementById('status');
+            if (statusEl) statusEl.textContent = 'Security check failed. Please refresh.';
+          });
+      }, 1000);
+    } else {
+      console.log('[TS] Max retries reached for error:', errCode);
+      const statusEl = document.getElementById('status');
+      if (statusEl) statusEl.textContent = 'Too many attempts. Please refresh the page.';
+    }
   }
   
-  function onTimeout(){
-    document.getElementById('status').textContent = 'Challenge timed out. Refresh the page.';
+  function onTimeout() {
+    console.log('[TS] Challenge timeout');
+    const statusEl = document.getElementById('status');
+    if (statusEl) statusEl.textContent = 'Challenge timed out. Refresh the page.';
     currentWidgetId = null;
     isRendering = false;
-    
-    fetch('/ts-client-log', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(clientContext({ phase:'timeout', webdriver: !!(navigator.webdriver || false) }))
-    });
+    trackPhase('timeout');
   }
 
-  // Script load handlers
-  function tsApiOnLoad(ev){
-    var scriptEl = document.getElementById(TURNSTILE_SCRIPT_ID);
+  // SCRIPT LOAD HANDLERS - Only one initialization path
+  function tsApiOnLoad(ev) {
+    console.log('[TS] Script loaded successfully');
+    scriptLoaded = true;
+
+    const scriptEl = document.getElementById(TURNSTILE_SCRIPT_ID);
     if (scriptEl) { 
       scriptEl.dataset.loaded = '1'; 
       scriptEl.dataset.failed = ''; 
     }
-    scriptLoaded = true;
 
-    fetch('/ts-client-log', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(clientContext({
-        phase: 'api-onload-explicit',
-        sid: window.__sid,
-        webdriver: !!(navigator.webdriver || false)
-      }))
-    });
+    trackPhase('script-loaded');
 
-    // Patch turnstile.render to track calls
-    if (window.turnstile && window.turnstile.render && !window.turnstile.render._patched) {
-      var originalRender = window.turnstile.render;
-      window.turnstile.render = function() {
-        renderCallCount++;
-        trackRenderCall('render-call-' + renderCallCount);
-        return originalRender.apply(this, arguments);
-      };
-      window.turnstile.render._patched = true;
-    }
-
-    // Start initialization when DOM is ready
+    // Start initialization
     if (document.readyState === 'complete' || document.readyState === 'interactive') {
       initializeTurnstile();
     } else {
@@ -2455,34 +2467,40 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     }
   }
 
-  function tsApiOnError(ev){
-    document.getElementById('status').textContent = 'Challenge script failed to load. Check adblock and refresh.';
-    var scriptEl = document.getElementById(TURNSTILE_SCRIPT_ID);
+  function tsApiOnError(ev) {
+    console.error('[TS] Script load failed');
+    const scriptEl = document.getElementById(TURNSTILE_SCRIPT_ID);
     if (scriptEl) scriptEl.dataset.failed = '1';
-    fetch('/ts-client-log', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(clientContext({
-        phase:'api-onerror',
-        src: ev && ev.target && ev.target.src || ''
-      }))
+    
+    const statusEl = document.getElementById('status');
+    if (statusEl) statusEl.textContent = 'Challenge script failed to load. Check adblock and refresh.';
+    
+    trackPhase('script-load-error', {
+      src: ev && ev.target && ev.target.src || ''
     });
   }
 </script>
 
 <!-- SINGLE SCRIPT TAG - No duplicate loading -->
-<script id="cf-turnstile-script" src="` + TURNSTILE_ORIGIN + `/turnstile/v0/api.js?render=explicit"
-        onload="tsApiOnLoad(event)"
-        onerror="tsApiOnError(event)"></script>
-</head><body>
+<script id="cf-turnstile-script" 
+        src="${TURNSTILE_ORIGIN}/turnstile/v0/api.js?render=explicit&onload=tsApiOnLoad"
+        onerror="tsApiOnError(event)"
+        async 
+        defer>
+</script>
+
+</head>
+<body>
   <div class="card">
     <h3>Verify you are human by completing the action below.</h3>
-    <p class="muted">We needs to review the security of your connection before proceeding.</p>
+    <p class="muted">We need to review the security of your connection before proceeding.</p>
     <div id="ts" aria-live="polite"></div>
-    <p id="status" class="status muted">Loading...</p>
+    <p id="status" class="status muted">Loading security check...</p>
     <noscript><p class="err">Turnstile requires JavaScript. Please enable JS and refresh.</p></noscript>
     <p class="muted" style="margin-top:18px">Protected by Cloudflare Turnstile</p>
   </div>
-</body></html>`;
+</body>
+</html>`;
 
   res.type("html").send(htmlContent);
 });
