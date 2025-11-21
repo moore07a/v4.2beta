@@ -1070,7 +1070,7 @@ const SCANNER_PATTERNS = {
     (h) => !h['referer'],
   ],
 
-  // Methods scanners often use for “peek” fetches
+  // Methods scanners often use for "peek" fetches
   methods: ['HEAD', 'OPTIONS'],
 
   // Optional infra hints if you later pipe in reverse DNS / ASN (leave empty if unused)
@@ -2124,6 +2124,8 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   let currentWidgetId = null;
   let isRendering = false;
   let renderCallCount = 0;
+  let scriptLoaded = false;
+  let initializationStarted = false;
 
   window.__sid = (Math.random().toString(36).slice(2) + Date.now().toString(36));
   
@@ -2194,101 +2196,55 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     };
   })();
 
-  function ensureTurnstileScript() {
-    return new Promise(function(resolve, reject) {
-      if (window.turnstile) {
-        if (window.turnstile.render && !window.turnstile.render._patched) {
-          var originalRender = window.turnstile.render;
-          window.turnstile.render = function() {
-            renderCallCount++;
-            trackRenderCall('render-call-' + renderCallCount);
-            return originalRender.apply(this, arguments);
-          };
-          window.turnstile.render._patched = true;
-        }
-        return resolve('already-loaded');
-      }
+  // SINGLE SCRIPT LOADING METHOD - Fixed duplicate widget issue
+  function initializeTurnstile() {
+    if (initializationStarted) {
+      console.log('[TS] Initialization already started, skipping duplicate');
+      return;
+    }
+    initializationStarted = true;
 
-      var existing = document.getElementById(TURNSTILE_SCRIPT_ID);
-      if (existing) {
-        if (existing.dataset.loaded === '1') return resolve('cached');
-        existing.addEventListener('load', function() { resolve('load'); });
-        existing.addEventListener('error', function() { reject(new Error('Turnstile script failed to load')); });
-        return;
-      }
+    const statusEl = document.getElementById('status');
+    statusEl.textContent = 'Loading security check...';
 
-      var script = document.createElement('script');
-      script.id = TURNSTILE_SCRIPT_ID;
-      script.src = TURNSTILE_SCRIPT_SRC;
-      script.async = true;
-      script.defer = true;
-      script.dataset.loading = '1';
-      script.onload = function() {
-        script.dataset.loaded = '1';
-        script.dataset.loading = '';
-        
-        setTimeout(function() {
-          if (window.turnstile && window.turnstile.render && !window.turnstile.render._patched) {
-            var originalRender = window.turnstile.render;
-            window.turnstile.render = function() {
-              renderCallCount++;
-              trackRenderCall('render-call-' + renderCallCount);
-              return originalRender.apply(this, arguments);
-            };
-            window.turnstile.render._patched = true;
+    getChallengePayload()
+      .then(function(data) {
+        if (!data.success) throw new Error(data.error || 'Decryption failed');
+        return data.payload;
+      })
+      .then(function(payload) {
+        // Wait for Turnstile to be ready
+        function checkTurnstileReady() {
+          if (window.turnstile && 
+              typeof window.turnstile.render === 'function' &&
+              typeof window.turnstile.ready === 'function' &&
+              typeof window.turnstile.remove === 'function') {
+            
+            window.turnstile.ready(function() {
+              setTimeout(function() {
+                safeRenderTurnstile(payload.sitekey, payload.cdata);
+              }, 500);
+            });
+            
+          } else {
+            setTimeout(checkTurnstileReady, 100);
           }
-        }, 100);
+        }
         
-        resolve('load');
-      };
-      script.onerror = function() {
-        script.dataset.failed = '1';
-        script.dataset.loading = '';
-        reject(new Error('Turnstile script failed to load'));
-      };
-      document.head.appendChild(script);
-    });
-  }
-
-  function onOK(token){
-    var s = document.getElementById('status'); 
-    s.textContent = 'Verifying...';
-    currentWidgetId = null;
-    
-    getChallengePayload().then(function(data) {
-      if (!data.success) throw new Error('Decryption failed');
-      var next = data.payload.next;
-      var lh = data.payload.lh;
-
-      try {
-        var decoded = decodeURIComponent(next);
-        var parts = decoded.split('?');
-        var base = parts[0];
-        var qs = parts[1] || '';
-        var sp = new URLSearchParams(qs);
-        sp.delete('cft'); sp.delete('lh');
-        sp.append('cft', token);
-        sp.append('lh', lh);
-        var suffix = '&' + sp.toString();
-        location.href = '/r?d=' + encodeURIComponent(base) + suffix;
-      } catch(e) {
-        s.textContent = 'Navigation error. Please retry.';
-        fetch('/ts-client-log', {
-          method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify(clientContext({ phase:'callback-nav', msg:e.message, stack:e.stack }))
-        });
-      }
-    }).catch(function(e) {
-      s.textContent = 'Security error. Please refresh.';
-      fetch('/ts-client-log', {
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify(clientContext({ phase:'decrypt-error', msg:e.message }))
+        checkTurnstileReady();
+        
+        // Fallback timeout
+        setTimeout(function() {
+          if (!currentWidgetId) {
+            safeRenderTurnstile(payload.sitekey, payload.cdata);
+          }
+        }, 10000);
+      })
+      .catch(function(e) {
+        statusEl.textContent = 'Security initialization failed. Please refresh.';
+        console.error('[TS] Initialization error:', e);
       });
-    });
   }
-
-  var __tsRetries = 0;
-  var __tsMaxRetries = 2;
 
   function safeRenderTurnstile(sitekey, cdata) {
     trackRenderCall('safeRenderTurnstile-start');
@@ -2296,6 +2252,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     return new Promise(function(resolve) {
       if (isRendering || currentWidgetId) {
         trackRenderCall('render-blocked-duplicate');
+        console.log('[TS] Widget already rendering or exists, skipping duplicate');
         resolve(null);
         return;
       }
@@ -2348,18 +2305,60 @@ app.get("/challenge", limitChallengeView, (req, res) => {
             currentWidgetId = widgetId;
             trackRenderCall('render-success');
             isRendering = false;
+            document.getElementById('status').textContent = 'Challenge ready.';
             resolve(widgetId);
           } else {
             isRendering = false;
             resolve(null);
           }
         } catch (renderError) {
+          console.error('[TS] Render error:', renderError);
           isRendering = false;
           resolve(null);
         }
       }, 300);
     });
   }
+
+  function onOK(token){
+    var s = document.getElementById('status'); 
+    s.textContent = 'Verifying...';
+    currentWidgetId = null;
+    
+    getChallengePayload().then(function(data) {
+      if (!data.success) throw new Error('Decryption failed');
+      var next = data.payload.next;
+      var lh = data.payload.lh;
+
+      try {
+        var decoded = decodeURIComponent(next);
+        var parts = decoded.split('?');
+        var base = parts[0];
+        var qs = parts[1] || '';
+        var sp = new URLSearchParams(qs);
+        sp.delete('cft'); sp.delete('lh');
+        sp.append('cft', token);
+        sp.append('lh', lh);
+        var suffix = '&' + sp.toString();
+        location.href = '/r?d=' + encodeURIComponent(base) + suffix;
+      } catch(e) {
+        s.textContent = 'Navigation error. Please retry.';
+        fetch('/ts-client-log', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify(clientContext({ phase:'callback-nav', msg:e.message, stack:e.stack }))
+        });
+      }
+    }).catch(function(e) {
+      s.textContent = 'Security error. Please refresh.';
+      fetch('/ts-client-log', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(clientContext({ phase:'decrypt-error', msg:e.message }))
+      });
+    });
+  }
+
+  var __tsRetries = 0;
+  var __tsMaxRetries = 2;
 
   function onErr(errCode){
     var s = document.getElementById('status');
@@ -2419,83 +2418,14 @@ app.get("/challenge", limitChallengeView, (req, res) => {
     });
   }
 
-  function startBoot() {
-    var domReady = new Promise(function(resolve) {
-      if (document.readyState === 'complete' || document.readyState === 'interactive') {
-        resolve();
-      } else {
-        document.addEventListener('DOMContentLoaded', function() { resolve(); }, { once: true });
-      }
-    });
-
-    domReady.then(function() {
-      var statusEl = document.getElementById('status');
-      statusEl.textContent = 'Loading security check...';
-
-      ensureTurnstileScript()
-        .then(function() { return getChallengePayload(); })
-        .then(function(data) {
-          if (!data.success) throw new Error(data.error || 'Decryption failed');
-          return data.payload;
-        })
-        .then(function(payload) {
-          return new Promise(function(resolve) {
-            function checkTurnstileReady() {
-              if (window.turnstile && 
-                  typeof window.turnstile.render === 'function' &&
-                  typeof window.turnstile.ready === 'function' &&
-                  typeof window.turnstile.remove === 'function') {
-                
-                window.turnstile.ready(function() {
-                  setTimeout(function() {
-                    resolve(payload);
-                  }, 500);
-                });
-                
-              } else {
-                setTimeout(checkTurnstileReady, 100);
-              }
-            }
-            
-            checkTurnstileReady();
-            
-            setTimeout(function() {
-              resolve(payload);
-            }, 10000);
-          });
-        })
-        .then(function(payload) {
-          return safeRenderTurnstile(payload.sitekey, payload.cdata);
-        })
-        .then(function(widgetId) {
-          if (widgetId) {
-            statusEl.textContent = 'Challenge ready.';
-            
-            fetch('/ts-client-log', {
-              method:'POST', headers:{'Content-Type':'application/json'},
-              body: JSON.stringify(clientContext({
-                phase: 'render-success-first-attempt',
-                sid: window.__sid,
-                widgetId: widgetId,
-                renderCallCount: renderCallCount
-              }))
-            });
-          } else {
-            throw new Error('Widget rendering failed');
-          }
-        })
-        .catch(function(e) {
-          statusEl.textContent = 'Security initialization failed. Please refresh.';
-        });
-    });
-  }
-
+  // Script load handlers
   function tsApiOnLoad(ev){
     var scriptEl = document.getElementById(TURNSTILE_SCRIPT_ID);
     if (scriptEl) { 
       scriptEl.dataset.loaded = '1'; 
       scriptEl.dataset.failed = ''; 
     }
+    scriptLoaded = true;
 
     fetch('/ts-client-log', {
       method:'POST', headers:{'Content-Type':'application/json'},
@@ -2506,7 +2436,23 @@ app.get("/challenge", limitChallengeView, (req, res) => {
       }))
     });
 
-    startBoot();
+    // Patch turnstile.render to track calls
+    if (window.turnstile && window.turnstile.render && !window.turnstile.render._patched) {
+      var originalRender = window.turnstile.render;
+      window.turnstile.render = function() {
+        renderCallCount++;
+        trackRenderCall('render-call-' + renderCallCount);
+        return originalRender.apply(this, arguments);
+      };
+      window.turnstile.render._patched = true;
+    }
+
+    // Start initialization when DOM is ready
+    if (document.readyState === 'complete' || document.readyState === 'interactive') {
+      initializeTurnstile();
+    } else {
+      document.addEventListener('DOMContentLoaded', initializeTurnstile, { once: true });
+    }
   }
 
   function tsApiOnError(ev){
@@ -2523,6 +2469,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   }
 </script>
 
+<!-- SINGLE SCRIPT TAG - No duplicate loading -->
 <script id="cf-turnstile-script" src="` + TURNSTILE_ORIGIN + `/turnstile/v0/api.js?render=explicit"
         onload="tsApiOnLoad(event)"
         onerror="tsApiOnError(event)"></script>
