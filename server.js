@@ -85,6 +85,15 @@ app.use((req, res, next) => {
   next();
 });
 
+app.get("/debug-bypass", (req, res) => {
+  res.json({
+    secretSet: !!INTERSTITIAL_BYPASS_SECRET,
+    secretLength: INTERSTITIAL_BYPASS_SECRET.length,
+    ibParam: req.query.ib || null,
+    hasBypass: hasInterstitialBypass(req)
+  });
+});
+
 // ================== HELPER FUNCTIONS ==================
 function mask(s){ if (!s) return ""; return s.length<=6 ? "*".repeat(s.length) : s.slice(0,4)+"…"+s.slice(-2); }
 
