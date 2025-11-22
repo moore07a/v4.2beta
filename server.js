@@ -2763,7 +2763,7 @@ app.get("/challenge", limitChallengeView, (req, res) => {
 <body>
   <div class="card">
     <h3>Verify you are human by completing the action below.</h3>
-    <p class="muted">We need to review the security of your connection before proceeding.</p>
+    <p class="muted">IAA needs to review the security of your connection before proceeding.</p>
     <div id="ts" aria-live="polite"></div>
     <p id="status" class="status muted">Loading security check...</p>
     <noscript><p class="err">Turnstile requires JavaScript. Please enable JS and refresh.</p></noscript>
