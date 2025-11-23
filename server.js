@@ -1470,18 +1470,15 @@ function markInterstitialHuman(nextEnc) {
 
 const INTERSTITIAL_BYPASS_SECRET = process.env.INTERSTITIAL_BYPASS_SECRET || "";
 
-if (!INTERSTITIAL_BYPASS_SECRET) {
-  addLog("[BYPASS] disabled (no INTERSTITIAL_BYPASS_SECRET set)");
-} else {
-  addLog("[BYPASS] enabled for debug use");
-}
-
 function hasInterstitialBypass(req) {
   if (!INTERSTITIAL_BYPASS_SECRET) return false;
+
   const q = req.query || {};
-  if (q && q.ib && q.ib === INTERSTITIAL_BYPASS_SECRET) return true;
+  if (q.ib && q.ib === INTERSTITIAL_BYPASS_SECRET) return true;
+
   const hdr = req.get("x-interstitial-bypass");
   if (hdr && hdr === INTERSTITIAL_BYPASS_SECRET) return true;
+
   return false;
 }
 
@@ -1637,20 +1634,22 @@ function checkSecurityPolicies(req) {
   const bypassInterstitial = hasInterstitialBypass(req);
 
   if (bypassInterstitial) {
-  addLog(
-    `[BYPASS] interstitial bypass active ip=${safeLogValue(ip)} ua="${safeLogValue(
-      ua.slice(0, UA_TRUNCATE_LENGTH)
-    )}"`
-  );
-  addSpacer();
-}
+    addLog(
+      `[BYPASS] interstitial bypass active ip=${safeLogValue(ip)} ua="${safeLogValue(
+        ua.slice(0, UA_TRUNCATE_LENGTH)
+      )}"`
+    );
+    addSpacer();
+  }
 
+  // IP bans still apply even with bypass
   if (isBanned(ip)) {
     addLog(`[BAN] blocked ip=${ip}`);
     addSpacer();
     return { blocked: true, status: 403, message: "Forbidden" };
   }
 
+  // Scanner detection → interstitial (unless bypass)
   const scannerDetections = detectScannerEnhanced(req);
   if (!bypassInterstitial && scannerDetections.length > 0) {
     const topDetection = scannerDetections[0];
@@ -1664,13 +1663,15 @@ function checkSecurityPolicies(req) {
     return { blocked: true, interstitial: true, scanner: topDetection.name };
   }
 
+  // Hard bad UAs → 403 (unless bypass)
   const BAD_UA = /(okhttp|python-requests|curl|wget|phantomjs)/i;
-if (!bypassInterstitial && BAD_UA.test(ua)) {
-  addLog(`[UA-BLOCK] ip=${ip} ua="${ua.slice(0, UA_TRUNCATE_LENGTH)}"`);
-  addSpacer();
-  return { blocked: true, status: 403, message: "Forbidden" };
-}
+  if (!bypassInterstitial && BAD_UA.test(ua)) {
+    addLog(`[UA-BLOCK] ip=${ip} ua="${ua.slice(0, UA_TRUNCATE_LENGTH)}"`);
+    addSpacer();
+    return { blocked: true, status: 403, message: "Forbidden" };
+  }
 
+  // Headless suspicion (strikes + optional block) (unless bypass)
   const hs = headlessSuspicion(req);
   if (!bypassInterstitial && hs.suspicious) {
     const softOnlyOne = hs.hardCount === 0 && hs.softCount === 1;
@@ -1697,6 +1698,7 @@ if (!bypassInterstitial && BAD_UA.test(ua)) {
     }
   }
 
+  // Geo / ASN blocking (still enforced even with bypass)
   const ctry = getCountry(req);
   const asn = getASN(req);
   if (countryBlocked(ctry)) {
@@ -2848,6 +2850,12 @@ function startupSummary() {
     `  • Geo fallback active=${Boolean(geoip)}`,
     `  • Health: interval=${fmtDurMH(HEALTH_INTERVAL_MS)} heartbeat=${fmtDurMH(HEALTH_HEARTBEAT_MS)}`  // ← Add this line
   ].join("\n");
+}
+
+if (!INTERSTITIAL_BYPASS_SECRET) {
+addLog("[BYPASS] disabled (no INTERSTITIAL_BYPASS_SECRET set)");
+} else {
+addLog("[BYPASS] enabled for debug use");
 }
 
 let _health = { ok: null, lastHeartbeat: 0, okStreak: 0, failStreak: 0, inflight: false };
