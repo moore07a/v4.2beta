@@ -1639,6 +1639,15 @@ function checkSecurityPolicies(req) {
   const ua = req.get("user-agent") || "";
   const bypassInterstitial = hasInterstitialBypass(req);
 
+  if (bypassInterstitial) {
+  addLog(
+    `[BYPASS] interstitial bypass active ip=${safeLogValue(ip)} ua="${safeLogValue(
+      ua.slice(0, UA_TRUNCATE_LENGTH)
+    )}"`
+  );
+  addSpacer();
+}
+
   if (isBanned(ip)) {
     addLog(`[BAN] blocked ip=${ip}`);
     addSpacer();
@@ -1659,11 +1668,11 @@ function checkSecurityPolicies(req) {
   }
 
   const BAD_UA = /(okhttp|python-requests|curl|wget|phantomjs)/i;
-  if (BAD_UA.test(ua)) {
-    addLog(`[UA-BLOCK] ip=${ip} ua="${ua.slice(0, UA_TRUNCATE_LENGTH)}"`);
-    addSpacer();
-    return { blocked: true, status: 403, message: "Forbidden" };
-  }
+if (!bypassInterstitial && BAD_UA.test(ua)) {
+  addLog(`[UA-BLOCK] ip=${ip} ua="${ua.slice(0, UA_TRUNCATE_LENGTH)}"`);
+  addSpacer();
+  return { blocked: true, status: 403, message: "Forbidden" };
+}
 
   const hs = headlessSuspicion(req);
   if (!bypassInterstitial && hs.suspicious) {
