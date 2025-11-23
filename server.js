@@ -85,15 +85,6 @@ app.use((req, res, next) => {
   next();
 });
 
-app.get("/debug-bypass", (req, res) => {
-  res.json({
-    secretSet: !!INTERSTITIAL_BYPASS_SECRET,
-    secretLength: INTERSTITIAL_BYPASS_SECRET.length,
-    ibParam: req.query.ib || null,
-    hasBypass: hasInterstitialBypass(req)
-  });
-});
-
 // ================== HELPER FUNCTIONS ==================
 function mask(s){ if (!s) return ""; return s.length<=6 ? "*".repeat(s.length) : s.slice(0,4)+"…"+s.slice(-2); }
 
@@ -1478,6 +1469,12 @@ function markInterstitialHuman(nextEnc) {
 }
 
 const INTERSTITIAL_BYPASS_SECRET = process.env.INTERSTITIAL_BYPASS_SECRET || "";
+
+if (!INTERSTITIAL_BYPASS_SECRET) {
+  addLog("[BYPASS] disabled (no INTERSTITIAL_BYPASS_SECRET set)");
+} else {
+  addLog("[BYPASS] enabled for debug use");
+}
 
 function hasInterstitialBypass(req) {
   if (!INTERSTITIAL_BYPASS_SECRET) return false;
