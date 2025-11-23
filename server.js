@@ -2848,14 +2848,18 @@ function startupSummary() {
     `  • Allowlist: exact=[${ALLOWLIST_DOMAINS.join(",")||"-"}] suffix=[${ALLOWLIST_SUFFIXES.join(",")||"-"}]`,
     `  • Challenge security: rateLimit=5/5min tokens=10min`,
     `  • Geo fallback active=${Boolean(geoip)}`,
-    `  • Health: interval=${fmtDurMH(HEALTH_INTERVAL_MS)} heartbeat=${fmtDurMH(HEALTH_HEARTBEAT_MS)}`  // ← Add this line
+    `  • Health: interval=${fmtDurMH(HEALTH_INTERVAL_MS)} heartbeat=${fmtDurMH(HEALTH_HEARTBEAT_MS)}`
   ].join("\n");
 }
 
+// Print the structured summary
+addLog(startupSummary());
+
+// Now print BYPASS state under it (correct position)
 if (!INTERSTITIAL_BYPASS_SECRET) {
-addLog("[BYPASS] disabled (no INTERSTITIAL_BYPASS_SECRET set)");
+  addLog("[BYPASS] disabled (no INTERSTITIAL_BYPASS_SECRET set)");
 } else {
-addLog("[BYPASS] enabled for debug use");
+  addLog("[BYPASS] enabled for debug use");
 }
 
 let _health = { ok: null, lastHeartbeat: 0, okStreak: 0, failStreak: 0, inflight: false };
