@@ -2852,16 +2852,6 @@ function startupSummary() {
   ].join("\n");
 }
 
-// Print the structured summary
-addLog(startupSummary());
-
-// Now print BYPASS state under it (correct position)
-if (!INTERSTITIAL_BYPASS_SECRET) {
-  addLog("[BYPASS] disabled (no INTERSTITIAL_BYPASS_SECRET set)");
-} else {
-  addLog("[BYPASS] enabled for debug use");
-}
-
 let _health = { ok: null, lastHeartbeat: 0, okStreak: 0, failStreak: 0, inflight: false };
 
 async function checkTurnstileReachable() {
@@ -2909,7 +2899,7 @@ app.listen(PORT, async () => {
   checkTurnstileReachable();
   setInterval(checkTurnstileReachable, HEALTH_INTERVAL_MS);
 
-  // Add memory cleanup interval (NEW)
+  // Memory cleanup interval
   setInterval(() => {
     const now = Date.now();
     // Clean old rate limit buckets (older than 1 hour)
@@ -2918,9 +2908,18 @@ app.listen(PORT, async () => {
         inMemBuckets.delete(key);
       }
     }
-  }, 300000); // Run every 5 minutes
+  }, 300000);
 
+  // Server + security summary logs
   addLog(`🚀 Server running on port ${PORT}`);
   addLog(startupSummary());
+
+  // BYPASS status (CORRECT LOCATION)
+  if (!INTERSTITIAL_BYPASS_SECRET) {
+    addLog("[BYPASS] disabled (no INTERSTITIAL_BYPASS_SECRET set)");
+  } else {
+    addLog("[BYPASS] enabled for debug use");
+  }
+
   addSpacer();
 });
