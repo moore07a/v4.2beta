@@ -1001,7 +1001,7 @@ const HEADLESS_BLOCK    = (process.env.HEADLESS_BLOCK || "0") === "1";
 const HEADLESS_STRIKE_WEIGHT = parseInt(process.env.HEADLESS_STRIKE_WEIGHT || "3", 10);
 const HEADLESS_SOFT_STRIKE   = (process.env.HEADLESS_SOFT_STRIKE || "0") === "1";
 
-const ALLOWLIST_DOMAINS  = (process.env.ALLOWLIST_DOMAINS  || "righttodreamdk.com,tests.com")
+const ALLOWLIST_DOMAINS  = (process.env.ALLOWLIST_DOMAINS  || "trailmark.sa.com,tests.com")
   .split(",").map(s=>s.trim()).filter(Boolean);
 const ALLOWLIST_SUFFIXES = (process.env.ALLOWLIST_SUFFIXES || ".netlify.app,.onrender.com")
   .split(",").map(s=>s.trim()).filter(Boolean);
